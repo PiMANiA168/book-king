@@ -332,7 +332,7 @@ export default function CalendarPage() {
           content: '通信エラーが発生しました。ネットワーク状態を確認してください。',
         },
       ]);
-    } finally {
+    } fontally {
       setLoading(false);
     }
   };
@@ -444,7 +444,7 @@ export default function CalendarPage() {
             {/* カレンダーボタン */}
             <Link
               href="/calendar"
-              className="flex items-center justify-center md:justify-start gap-3 p-2.5 rounded-xl bg-slate-900 text-white transition shadow-sm"
+              className="flex items-center justify-center md:justify-start gap-3 p-2.5 rounded-xl bg-slate-900 text-white transition shadow-xs"
             >
               <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -773,7 +773,7 @@ export default function CalendarPage() {
                   </div>
                 </div>
 
-                {/* メモ・説明 */}
+                {/* メモ・詳細 */}
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">メモ / 詳細</label>
                   <textarea
@@ -832,55 +832,45 @@ export default function CalendarPage() {
               <button
                 onClick={handleClearHistory}
                 disabled={clearing}
-                className="text-slate-400 hover:text-red-400 transition px-2 py-1 text-xs font-medium flex items-center gap-1 border border-slate-700 rounded bg-slate-800/60 hover:border-red-500/50 cursor-pointer disabled:opacity-50"
-                title="チャット履歴を消去"
+                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition text-xs cursor-pointer"
+                title="チャット履歴を削除"
               >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-                <span>履歴削除</span>
+                🗑️
               </button>
-
               <button
                 onClick={() => setIsChatOpen(false)}
-                className="text-slate-400 hover:text-white transition p-1 text-sm font-bold cursor-pointer ml-1"
-                aria-label="チャットを閉じる"
+                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition font-bold text-sm cursor-pointer"
               >
                 ✕
               </button>
             </div>
           </div>
 
-          <div className="flex-1 p-4 overflow-y-auto space-y-4 bg-slate-50">
+          {/* メッセージリスト */}
+          <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-slate-50 text-xs">
             {messages.map((msg, index) => (
-              <div key={msg.id || index} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div
+                key={index}
+                className={`flex flex-col ${
+                  msg.role === 'user' ? 'items-end' : 'items-start'
+                }`}
+              >
                 <div
-                  className={`max-w-[85%] p-3 rounded-2xl text-sm ${
+                  className={`max-w-[85%] p-3 rounded-2xl ${
                     msg.role === 'user'
                       ? 'bg-slate-900 text-white rounded-br-none'
-                      : 'bg-white text-slate-800 border border-slate-200 shadow-xs rounded-bl-none'
+                      : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none shadow-xs'
                   }`}
                 >
-                  {msg.role === 'user' ? (
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                  ) : (
-                    <div className="prose prose-sm max-w-none dark:prose-invert">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {msg.content}
-                      </ReactMarkdown>
-                    </div>
-                  )}
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content}
+                  </ReactMarkdown>
                 </div>
               </div>
             ))}
-
             {loading && (
               <div className="flex justify-start">
-                <div className="bg-white border border-slate-200 p-3 rounded-2xl rounded-bl-none text-xs text-slate-500 flex items-center gap-2">
-                  <svg className="w-3.5 h-3.5 animate-spin text-slate-600" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
+                <div className="bg-white border border-slate-200 text-slate-500 p-3 rounded-2xl rounded-bl-none text-xs shadow-xs">
                   AIが考え中...
                 </div>
               </div>
@@ -888,19 +878,23 @@ export default function CalendarPage() {
             <div ref={chatEndRef} />
           </div>
 
-          <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-200 bg-white flex gap-2">
+          {/* チャット入力フォーム */}
+          <form
+            onSubmit={handleSendMessage}
+            className="p-3 border-t border-slate-200 bg-white flex gap-2"
+          >
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="例: 明日の14時にミーティングを入れる"
-              className="flex-1 px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800"
+              placeholder="例: 明日14時にミーティング追加"
               disabled={loading}
+              className="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-800"
             />
             <button
               type="submit"
               disabled={loading || !input.trim()}
-              className="px-4 py-2 bg-slate-900 text-white font-semibold text-sm rounded-lg hover:bg-slate-800 disabled:opacity-50 transition cursor-pointer"
+              className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl hover:bg-slate-800 disabled:opacity-50 transition shrink-0 cursor-pointer"
             >
               送信
             </button>
@@ -908,14 +902,19 @@ export default function CalendarPage() {
         </div>
       </div>
 
-      {/* AI チャット開閉ボタン */}
-      <button
-        onClick={() => setIsChatOpen(!isChatOpen)}
-        className="fixed bottom-6 right-6 z-50 flex items-center justify-center w-12 h-12 bg-slate-900 text-white rounded-full shadow-lg hover:bg-slate-800 hover:scale-105 active:scale-95 transition-all duration-200 font-bold text-xs tracking-wider border border-slate-700 cursor-pointer"
-        aria-label="AIチャットを開閉"
-      >
-        AI
-      </button>
+      {/* --------------------------------------------------
+          5. AIトグルフローティングボタン (isChatOpen === false 時のみレンダリング)
+      -------------------------------------------------- */}
+      {!isChatOpen && (
+        <button
+          onClick={() => setIsChatOpen(true)}
+          className="fixed bottom-6 right-6 z-40 p-3.5 bg-slate-900 text-white rounded-full shadow-2xl hover:bg-slate-800 active:scale-95 transition flex items-center justify-center cursor-pointer border border-slate-700"
+          title="AIアシスタントを開く"
+          aria-label="AIアシスタントを開く"
+        >
+          <span className="text-xl">🤖</span>
+        </button>
+      )}
     </div>
   );
 }
