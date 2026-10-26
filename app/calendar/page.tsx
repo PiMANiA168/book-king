@@ -27,6 +27,7 @@ interface CalendarEvent {
   group_id: string;
   created_by: string;
   color?: string;
+  creator?: UserProfile;
   participants?: UserProfile[];
 }
 
@@ -73,9 +74,7 @@ export default function CalendarPage() {
   const [groupMembersMap, setGroupMembersMap] = useState<Record<string, UserProfile[]>>({});
   const [authChecking, setAuthChecking] = useState(true);
 
-  // --------------------------------------------------
-  // 予定追加・編集モーダル用ステート
-  // --------------------------------------------------
+  // モーダル用
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [eventTitle, setEventTitle] = useState('');
@@ -187,8 +186,25 @@ export default function CalendarPage() {
 
     if (!error && rawEvents) {
       const eventIds = rawEvents.map((e) => e.id);
-      let participantsMap: Record<string, UserProfile[]> = {};
+      const userIds = Array.from(new Set(rawEvents.map((e) => e.created_by).filter(Boolean)));
 
+      // 作成者プロフィールの取得
+      let creatorsMap: Record<string, UserProfile> = {};
+      if (userIds.length > 0) {
+        const { data: profilesData } = await supabase
+          .from('profiles')
+          .select('id, full_name, avatar_url, email')
+          .in('id', userIds);
+
+        if (profilesData) {
+          profilesData.forEach((p) => {
+            creatorsMap[p.id] = p;
+          });
+        }
+      }
+
+      // 同行者プロフィールの取得
+      let participantsMap: Record<string, UserProfile[]> = {};
       if (eventIds.length > 0) {
         const { data: partData } = await supabase
           .from('event_participants')
@@ -205,6 +221,7 @@ export default function CalendarPage() {
 
       const formattedEvents: CalendarEvent[] = rawEvents.map((e) => ({
         ...e,
+        creator: creatorsMap[e.created_by],
         participants: participantsMap[e.id] || [],
       }));
 
@@ -496,7 +513,8 @@ export default function CalendarPage() {
     }
   };
 
-  const renderAvatar = (user: UserProfile, size = 'w-4 h-4 text-[9px]') => {
+  const renderAvatar = (user?: UserProfile, size = 'w-4 h-4 text-[9px]') => {
+    if (!user) return null;
     if (user.avatar_url) {
       return (
         <img
@@ -609,6 +627,7 @@ export default function CalendarPage() {
         </header>
 
         <div className="flex-1 p-2 md:p-5 flex flex-col lg:flex-row gap-3 md:gap-4 overflow-y-auto">
+          {/* カレンダーグリッド */}
           <div className="flex-1 bg-white border border-slate-200 rounded-2xl shadow-xs flex flex-col overflow-hidden min-h-[360px] lg:min-h-0">
             <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-500 py-2">
               <span className="text-red-500">日</span>
@@ -652,8 +671,10 @@ export default function CalendarPage() {
                           className="text-[9px] md:text-[10px] text-white px-1 py-0.5 rounded truncate flex items-center justify-between shadow-xs hover:opacity-90"
                         >
                           <span className="truncate">{evt.title}</span>
+                          {/* 作成者・参加者のアイコン */}
                           <div className="flex -space-x-1 shrink-0 ml-1">
-                            {evt.participants?.slice(0, 2).map((p) => (
+                            {evt.creator && renderAvatar(evt.creator, 'w-3 h-3 text-[7px]')}
+                            {evt.participants?.filter(p => p.id !== evt.created_by).slice(0, 2).map((p) => (
                               <div key={p.id}>{renderAvatar(p, 'w-3 h-3 text-[7px]')}</div>
                             ))}
                           </div>
@@ -669,6 +690,7 @@ export default function CalendarPage() {
             </div>
           </div>
 
+          {/* 選択日の詳細パネル */}
           <div className="w-full lg:w-80 bg-white border border-slate-200 rounded-2xl p-4 flex flex-col overflow-hidden shrink-0">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <h2 className="font-bold text-slate-800 text-xs">
@@ -703,16 +725,16 @@ export default function CalendarPage() {
                     </div>
                     <div className="font-bold text-slate-900 text-xs mb-1.5">{evt.title}</div>
 
-                    {evt.participants && evt.participants.length > 0 && (
-                      <div className="flex items-center gap-1 mt-2 pt-1.5 border-t border-slate-200/60">
-                        <span className="text-[10px] text-slate-400">参加:</span>
-                        <div className="flex items-center -space-x-1">
-                          {evt.participants.map((p) => (
-                            <div key={p.id} title={p.full_name || p.email}>{renderAvatar(p, 'w-4 h-4 text-[8px]')}</div>
-                          ))}
-                        </div>
+                    {/* 参加メンバー一覧表示 */}
+                    <div className="flex items-center gap-1.5 mt-2 pt-1.5 border-t border-slate-200/60">
+                      <span className="text-[10px] text-slate-400">作成/同行:</span>
+                      <div className="flex items-center -space-x-1">
+                        {evt.creator && renderAvatar(evt.creator, 'w-4 h-4 text-[8px]')}
+                        {evt.participants?.filter(p => p.id !== evt.created_by).map((p) => (
+                          <div key={p.id} title={p.full_name || p.email}>{renderAvatar(p, 'w-4 h-4 text-[8px]')}</div>
+                        ))}
                       </div>
-                    )}
+                    </div>
                   </div>
                 ))
               )}
@@ -721,12 +743,13 @@ export default function CalendarPage() {
         </div>
       </div>
 
+      {/* 予定追加・編集モーダル */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-slate-900/40 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 bg-slate-50">
               <h3 className="text-xs font-bold text-slate-900">
-                {editingEventId ? '予定の編集' : '新しい予定の作成'}
+                {editingEventId ? '予定の詳細・編集' : '新しい予定の作成'}
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
@@ -751,7 +774,7 @@ export default function CalendarPage() {
                     required
                     value={eventTitle}
                     onChange={(e) => setEventTitle(e.target.value)}
-                    placeholder="例: ミーティング"
+                    placeholder="例: チームミーティング"
                     className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-800"
                   />
                 </div>
@@ -772,9 +795,10 @@ export default function CalendarPage() {
                   </select>
                 </div>
 
+                {/* 同行者（複数人選択） */}
                 {currentAvailableMembers.length > 0 && (
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">参加メンバー（複数選択可）</label>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">同行メンバー選択</label>
                     <div className="flex flex-wrap gap-1.5 p-2 border border-slate-200 rounded-lg bg-slate-50 max-h-28 overflow-y-auto">
                       {currentAvailableMembers.map((member) => {
                         const isSelected = selectedParticipantIds.includes(member.id);
@@ -897,6 +921,7 @@ export default function CalendarPage() {
         </div>
       )}
 
+      {/* AI チャットパネル */}
       <div
         className={`fixed top-0 right-0 h-full bg-white border-l border-slate-200 flex flex-col shadow-2xl z-40 transition-all duration-300 ${
           isChatOpen ? 'w-full sm:w-96 opacity-100' : 'w-0 opacity-0 pointer-events-none'
