@@ -11,14 +11,23 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+interface UserProfile {
+  id: string;
+  full_name?: string;
+  avatar_url?: string;
+  email?: string;
+}
+
 interface CalendarEvent {
-  id?: string;
+  id: string;
   title: string;
   start_time: string;
   end_time: string;
   description?: string;
-  group_id?: string;
-  created_by?: string;
+  group_id: string;
+  created_by: string;
+  color?: string;
+  participants?: UserProfile[];
 }
 
 interface ChatMessage {
@@ -33,10 +42,18 @@ interface GroupInfo {
   name: string;
 }
 
+const COLOR_OPTIONS = [
+  { name: 'ブルー', value: '#3b82f6' },
+  { name: 'グリーン', value: '#10b981' },
+  { name: 'レッド', value: '#ef4444' },
+  { name: 'パープル', value: '#8b5cf6' },
+  { name: 'オレンジ', value: '#f97316' },
+  { name: 'グレー', value: '#64748b' },
+];
+
 const DEFAULT_WELCOME_MESSAGE: ChatMessage = {
   role: 'assistant',
-  content:
-    'こんにちは！BOOK KINGのAIアシスタントです。予定の確認や「明日15時に会議を追加して」といった指示を教えてください！',
+  content: 'こんにちは！BOOK KINGのAIアシスタントです。予定の確認や追加の指示を教えてください！',
 };
 
 export default function CalendarPage() {
@@ -49,22 +66,26 @@ export default function CalendarPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [clearing, setClearing] = useState(false);
-  
+
   const [userId, setUserId] = useState<string>('');
   const [userGroups, setUserGroups] = useState<GroupInfo[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string>('ALL');
+  const [groupMembersMap, setGroupMembersMap] = useState<Record<string, UserProfile[]>>({});
   const [authChecking, setAuthChecking] = useState(true);
 
   // --------------------------------------------------
-  // 予定追加モーダル用ステート
+  // 予定追加・編集モーダル用ステート
   // --------------------------------------------------
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [eventTitle, setEventTitle] = useState('');
   const [eventDate, setEventDate] = useState('');
   const [eventStartTime, setEventStartTime] = useState('10:00');
   const [eventEndTime, setEventEndTime] = useState('11:00');
   const [eventDescription, setEventDescription] = useState('');
   const [eventTargetGroupId, setEventTargetGroupId] = useState('');
+  const [eventColor, setEventColor] = useState('#3b82f6');
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
   const [isSavingEvent, setIsSavingEvent] = useState(false);
   const [eventErrorMessage, setEventErrorMessage] = useState('');
 
@@ -76,7 +97,6 @@ export default function CalendarPage() {
     }
   }, [messages, loading, isChatOpen]);
 
-  // 未ログインガード & 初期データ取得
   useEffect(() => {
     const initData = async () => {
       try {
@@ -90,41 +110,32 @@ export default function CalendarPage() {
         const currentUserId = session.user.id;
         setUserId(currentUserId);
 
-        // 1. 所属している全グループを取得
-        const { data: memberData, error: memberError } = await supabase
+        const { data: memberData } = await supabase
           .from('group_members')
           .select('group_id, groups(id, name)')
           .eq('user_id', currentUserId);
-
-        if (memberError) {
-          console.error('グループ取得エラー:', memberError);
-        }
 
         const groups: GroupInfo[] = [];
         if (memberData && memberData.length > 0) {
           memberData.forEach((item: any) => {
             if (item.groups) {
-              groups.push({ id: item.groups.id, name: item.groups.name || '名称未設定グループ' });
-            } else if (item.group_id) {
-              groups.push({ id: item.group_id, name: 'グループ' });
+              groups.push({ id: item.groups.id, name: item.groups.name || 'グループ' });
             }
           });
         }
 
         setUserGroups(groups);
 
-        // 2. 予定の取得
         if (groups.length > 0) {
           setSelectedGroupId('ALL');
-          await fetchEvents('ALL', groups.map((g) => g.id));
-        } else {
-          setSelectedGroupId('');
-          setEvents([]);
+          const groupIds = groups.map((g) => g.id);
+          await fetchEvents('ALL', groupIds);
+          await fetchAllGroupMembers(groupIds);
         }
 
         fetchChatHistory(currentUserId);
       } catch (err) {
-        console.error('初期化処理例外:', err);
+        console.error('初期化エラー:', err);
       } finally {
         setAuthChecking(false);
       }
@@ -133,7 +144,26 @@ export default function CalendarPage() {
     initData();
   }, []);
 
-  // 予定の取得処理
+  const fetchAllGroupMembers = async (groupIds: string[]) => {
+    if (groupIds.length === 0) return;
+    const { data } = await supabase
+      .from('group_members')
+      .select('group_id, user_id, profiles(id, full_name, avatar_url, email)')
+      .in('group_id', groupIds);
+
+    if (data) {
+      const map: Record<string, UserProfile[]> = {};
+      data.forEach((item: any) => {
+        const gid = item.group_id;
+        if (!map[gid]) map[gid] = [];
+        if (item.profiles) {
+          map[gid].push(item.profiles);
+        }
+      });
+      setGroupMembersMap(map);
+    }
+  };
+
   const fetchEvents = async (targetGroupId?: string, availableGroupIds?: string[]) => {
     const gid = targetGroupId !== undefined ? targetGroupId : selectedGroupId;
     const allIds = availableGroupIds || userGroups.map((g) => g.id);
@@ -144,7 +174,6 @@ export default function CalendarPage() {
     }
 
     let query = supabase.from('events').select('*');
-
     if (gid === 'ALL') {
       query = query.in('group_id', allIds);
     } else if (gid) {
@@ -154,56 +183,86 @@ export default function CalendarPage() {
       return;
     }
 
-    const { data, error } = await query.order('start_time', { ascending: true });
+    const { data: rawEvents, error } = await query.order('start_time', { ascending: true });
 
-    if (!error && data) {
-      setEvents(data);
-    } else if (error) {
-      console.error('予定取得エラー:', error);
+    if (!error && rawEvents) {
+      const eventIds = rawEvents.map((e) => e.id);
+      let participantsMap: Record<string, UserProfile[]> = {};
+      
+      if (eventIds.length > 0) {
+        const { data: partData } = await supabase
+          .from('event_participants')
+          .select('event_id, profiles(id, full_name, avatar_url, email)')
+          .in('event_id', eventIds);
+
+        if (partData) {
+          partData.forEach((p: any) => {
+            if (!participantsMap[p.event_id]) participantsMap[p.event_id] = [];
+            if (p.profiles) participantsMap[p.event_id].push(p.profiles);
+          });
+        }
+      }
+
+      const formattedEvents: CalendarEvent[] = rawEvents.map((e) => ({
+        ...e,
+        participants: participantsMap[e.id] || [],
+      }));
+
+      setEvents(formattedEvents);
     }
   };
 
   const fetchChatHistory = async (targetUserId: string) => {
-    const uid = targetUserId || userId;
-    if (!uid) return;
-
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('chat_messages')
       .select('*')
-      .eq('user_id', uid)
+      .eq('user_id', targetUserId)
       .order('created_at', { ascending: true });
 
-    if (!error && data && data.length > 0) {
+    if (data && data.length > 0) {
       setMessages(data);
-    } else {
-      setMessages([DEFAULT_WELCOME_MESSAGE]);
     }
   };
 
-  // --------------------------------------------------
-  // 予定追加モーダルの開閉関数
-  // --------------------------------------------------
-  const openAddEventModal = (targetDate?: Date) => {
-    const baseDate = targetDate || selectedDate || new Date();
-    const yyyy = baseDate.getFullYear();
-    const mm = String(baseDate.getMonth() + 1).padStart(2, '0');
-    const dd = String(baseDate.getDate()).padStart(2, '0');
-    
-    setEventTitle('');
-    setEventDate(`${yyyy}-${mm}-${dd}`);
-    setEventStartTime('10:00');
-    setEventEndTime('11:00');
-    setEventDescription('');
+  const openModal = (targetDate?: Date, eventToEdit?: CalendarEvent) => {
     setEventErrorMessage('');
-    
-    // デフォルト登録先グループの設定
-    const defaultGroup = selectedGroupId === 'ALL' ? (userGroups[0]?.id || '') : selectedGroupId;
-    setEventTargetGroupId(defaultGroup);
+    if (eventToEdit) {
+      setEditingEventId(eventToEdit.id);
+      setEventTitle(eventToEdit.title);
+      const startDate = new Date(eventToEdit.start_time);
+      const endDate = new Date(eventToEdit.end_time);
 
-    setIsAddModalOpen(true);
+      const yyyy = startDate.getFullYear();
+      const mm = String(startDate.getMonth() + 1).padStart(2, '0');
+      const dd = String(startDate.getDate()).padStart(2, '0');
+      setEventDate(`${yyyy}-${mm}-${dd}`);
+
+      setEventStartTime(startDate.toTimeString().slice(0, 5));
+      setEventEndTime(endDate.toTimeString().slice(0, 5));
+      setEventDescription(eventToEdit.description || '');
+      setEventTargetGroupId(eventToEdit.group_id);
+      setEventColor(eventToEdit.color || '#3b82f6');
+      setSelectedParticipantIds(eventToEdit.participants?.map((p) => p.id) || []);
+    } else {
+      setEditingEventId(null);
+      const baseDate = targetDate || selectedDate || new Date();
+      const yyyy = baseDate.getFullYear();
+      const mm = String(baseDate.getMonth() + 1).padStart(2, '0');
+      const dd = String(baseDate.getDate()).padStart(2, '0');
+
+      setEventTitle('');
+      setEventDate(`${yyyy}-${mm}-${dd}`);
+      setEventStartTime('10:00');
+      setEventEndTime('11:00');
+      setEventDescription('');
+      setEventColor('#3b82f6');
+      const defaultGroup = selectedGroupId === 'ALL' ? (userGroups[0]?.id || '') : selectedGroupId;
+      setEventTargetGroupId(defaultGroup);
+      setSelectedParticipantIds([userId]);
+    }
+    setIsModalOpen(true);
   };
 
-  // 予定の手動追加処理
   const handleSaveEvent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!eventTitle.trim()) {
@@ -211,7 +270,7 @@ export default function CalendarPage() {
       return;
     }
     if (!eventTargetGroupId) {
-      setEventErrorMessage('追加先のグループを選択してください。');
+      setEventErrorMessage('グループを選択してください。');
       return;
     }
 
@@ -222,27 +281,75 @@ export default function CalendarPage() {
       const startDateTime = new Date(`${eventDate}T${eventStartTime}:00`).toISOString();
       const endDateTime = new Date(`${eventDate}T${eventEndTime}:00`).toISOString();
 
-      const { error } = await supabase.from('events').insert({
-        title: eventTitle.trim(),
-        start_time: startDateTime,
-        end_time: endDateTime,
-        description: eventDescription.trim() || null,
-        group_id: eventTargetGroupId,
-        created_by: userId,
-      });
+      let currentEventId = editingEventId;
 
-      if (error) {
-        console.error('予定追加エラー:', error);
-        setEventErrorMessage('予定の保存に失敗しました。');
+      if (editingEventId) {
+        const { error } = await supabase
+          .from('events')
+          .update({
+            title: eventTitle.trim(),
+            start_time: startDateTime,
+            end_time: endDateTime,
+            description: eventDescription.trim() || null,
+            group_id: eventTargetGroupId,
+            color: eventColor,
+          })
+          .eq('id', editingEventId);
+
+        if (error) throw error;
       } else {
-        setIsAddModalOpen(false);
-        await fetchEvents();
+        const { data, error } = await supabase
+          .from('events')
+          .insert({
+            title: eventTitle.trim(),
+            start_time: startDateTime,
+            end_time: endDateTime,
+            description: eventDescription.trim() || null,
+            group_id: eventTargetGroupId,
+            created_by: userId,
+            color: eventColor,
+          })
+          .select()
+          .single();
+
+        if (error) throw error;
+        currentEventId = data.id;
       }
-    } catch (err) {
-      console.error('予定保存例外:', err);
-      setEventErrorMessage('エラーが発生しました。入力内容を確認してください。');
+
+      if (currentEventId) {
+        await supabase.from('event_participants').delete().eq('event_id', currentEventId);
+
+        if (selectedParticipantIds.length > 0) {
+          const participantRows = selectedParticipantIds.map((pid) => ({
+            event_id: currentEventId,
+            user_id: pid,
+          }));
+          await supabase.from('event_participants').insert(participantRows);
+        }
+      }
+
+      setIsModalOpen(false);
+      await fetchEvents();
+    } catch (err: any) {
+      console.error('予定保存エラー:', err);
+      setEventErrorMessage('予定の保存に失敗しました。');
     } finally {
       setIsSavingEvent(false);
+    }
+  };
+
+  const handleDeleteEvent = async () => {
+    if (!editingEventId) return;
+    if (!window.confirm('この予定を削除してもよろしいですか？')) return;
+
+    try {
+      const { error } = await supabase.from('events').delete().eq('id', editingEventId);
+      if (error) throw error;
+      setIsModalOpen(false);
+      await fetchEvents();
+    } catch (err) {
+      console.error('予定削除エラー:', err);
+      alert('削除に失敗しました。');
     }
   };
 
@@ -252,16 +359,10 @@ export default function CalendarPage() {
 
     setClearing(true);
     try {
-      const { error } = await supabase
-        .from('chat_messages')
-        .delete()
-        .eq('user_id', userId);
-
-      if (!error) {
-        setMessages([DEFAULT_WELCOME_MESSAGE]);
-      }
+      await supabase.from('chat_messages').delete().eq('user_id', userId);
+      setMessages([DEFAULT_WELCOME_MESSAGE]);
     } catch (err) {
-      console.error('履歴削除例外:', err);
+      console.error('履歴削除エラー:', err);
     } finally {
       setClearing(false);
     }
@@ -316,23 +417,11 @@ export default function CalendarPage() {
           });
         }
 
-        if (data.eventAdded) {
-          await fetchEvents();
-        }
-      } else {
-        const errorMsg = data.reply || data.error || '応答の取得に失敗しました。';
-        setMessages((prev) => [...prev, { role: 'assistant', content: errorMsg }]);
+        if (data.eventAdded) await fetchEvents();
       }
     } catch (error) {
-      console.error('送信エラー:', error);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: '通信エラーが発生しました。ネットワーク状態を確認してください。',
-        },
-      ]);
-    } fontally {
+      console.error('AI送信エラー:', error);
+    } finally {
       setLoading(false);
     }
   };
@@ -388,12 +477,8 @@ export default function CalendarPage() {
     });
   };
 
-  const prevMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1));
-  };
-  const nextMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1));
-  };
+  const prevMonth = () => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1));
+  const nextMonth = () => setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1));
   const thisMonth = () => {
     const today = new Date();
     setCurrentDate(today);
@@ -411,6 +496,24 @@ export default function CalendarPage() {
     }
   };
 
+  const renderAvatar = (user: UserProfile, size = 'w-4 h-4 text-[9px]') => {
+    if (user.avatar_url) {
+      return (
+        <img
+          src={user.avatar_url}
+          alt={user.full_name || 'User'}
+          className={`${size} rounded-full object-cover border border-white shrink-0`}
+        />
+      );
+    }
+    const initial = (user.full_name || user.email || 'U').charAt(0).toUpperCase();
+    return (
+      <div className={`${size} rounded-full bg-slate-700 text-white font-bold flex items-center justify-center border border-white shrink-0`}>
+        {initial}
+      </div>
+    );
+  };
+
   if (authChecking) {
     return (
       <div className="h-screen flex items-center justify-center bg-slate-100 text-xs font-semibold text-slate-500">
@@ -420,28 +523,20 @@ export default function CalendarPage() {
   }
 
   const selectedDateEvents = getEventsForDate(selectedDate);
+  const currentAvailableMembers = eventTargetGroupId ? (groupMembersMap[eventTargetGroupId] || []) : [];
 
   return (
-    <div className="flex h-screen bg-slate-100 text-slate-800 overflow-hidden relative">
-      
-      {/* --------------------------------------------------
-          1. 左サイドメニューバー
-      -------------------------------------------------- */}
+    <div className="flex h-[100dvh] bg-slate-100 text-slate-800 overflow-hidden relative">
       <aside className="w-16 md:w-60 bg-white border-r border-slate-200 flex flex-col justify-between p-3 md:p-5 shrink-0 z-20">
         <div className="space-y-6">
-          {/* BOOK KING ロゴ */}
           <div className="flex items-center justify-center md:justify-start">
             <span className="hidden md:inline font-black text-xl text-slate-900 tracking-wider">
               BOOK KING
             </span>
-            <span className="md:hidden font-black text-lg text-slate-900">
-              BK
-            </span>
+            <span className="md:hidden font-black text-lg text-slate-900">BK</span>
           </div>
 
-          {/* メニューアイコンリスト */}
           <nav className="space-y-1.5">
-            {/* カレンダーボタン */}
             <Link
               href="/calendar"
               className="flex items-center justify-center md:justify-start gap-3 p-2.5 rounded-xl bg-slate-900 text-white transition shadow-xs"
@@ -452,7 +547,6 @@ export default function CalendarPage() {
               <span className="hidden md:inline text-xs font-bold">カレンダー</span>
             </Link>
 
-            {/* グループ移動ボタン（未加入時のみ薄字表示） */}
             <Link
               href="/groups"
               className="flex items-center justify-center md:justify-start gap-3 p-2.5 rounded-xl text-slate-600 hover:bg-slate-100 transition"
@@ -462,53 +556,29 @@ export default function CalendarPage() {
               </svg>
               <div className="hidden md:flex items-center gap-1.5">
                 <span className="text-xs font-bold">グループ</span>
-                {userGroups.length === 0 && (
-                  <span className="text-[10px] text-slate-400 font-normal">（未加入）</span>
-                )}
               </div>
             </Link>
           </nav>
         </div>
 
-        {/* 下部：アカウントメニュー */}
         <div className="pt-4 border-t border-slate-100 flex items-center justify-center md:justify-start relative">
           <UserMenu />
         </div>
       </aside>
 
-      {/* --------------------------------------------------
-          2. メインエリア (ヘッダー + カレンダー + 予定詳細)
-      -------------------------------------------------- */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">
-        {/* ヘッダー */}
+      <div className="flex-1 flex flex-col min-w-0 h-[100dvh] overflow-hidden">
         <header className="bg-white border-b border-slate-200 p-3 md:p-4 flex flex-wrap items-center justify-between gap-2 shrink-0">
-          <div className="flex items-center gap-3 md:gap-4">
-            <span className="text-base md:text-xl font-bold text-slate-800 whitespace-nowrap">
+          <div className="flex items-center gap-2 md:gap-4">
+            <span className="text-sm md:text-xl font-bold text-slate-800 whitespace-nowrap">
               {currentDate.getFullYear()}年 {currentDate.getMonth() + 1}月
             </span>
 
             <div className="flex items-center bg-white border border-slate-300 rounded-lg overflow-hidden shadow-xs text-xs">
-              <button
-                onClick={prevMonth}
-                className="px-2.5 py-1.5 hover:bg-slate-50 text-slate-600 transition cursor-pointer"
-              >
-                &lt;
-              </button>
-              <button
-                onClick={thisMonth}
-                className="px-3 py-1.5 font-semibold border-x border-slate-200 hover:bg-slate-50 transition text-slate-700 cursor-pointer"
-              >
-                今月
-              </button>
-              <button
-                onClick={nextMonth}
-                className="px-2.5 py-1.5 hover:bg-slate-50 text-slate-600 transition cursor-pointer"
-              >
-                &gt;
-              </button>
+              <button onClick={prevMonth} className="px-2 py-1 hover:bg-slate-50 text-slate-600 transition">&lt;</button>
+              <button onClick={thisMonth} className="px-2.5 py-1 font-semibold border-x border-slate-200 hover:bg-slate-50 transition text-slate-700">今月</button>
+              <button onClick={nextMonth} className="px-2 py-1 hover:bg-slate-50 text-slate-600 transition">&gt;</button>
             </div>
 
-            {/* グループ切り替えドロップダウン */}
             {userGroups.length > 0 && (
               <select
                 value={selectedGroupId}
@@ -517,49 +587,30 @@ export default function CalendarPage() {
                   setSelectedGroupId(newGid);
                   fetchEvents(newGid);
                 }}
-                className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-800 cursor-pointer"
+                className="px-2 py-1 md:px-3 md:py-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-700 max-w-[130px] md:max-w-xs truncate"
               >
-                <option value="ALL">表示: すべてのグループ ({userGroups.length})</option>
+                <option value="ALL">全グループ ({userGroups.length})</option>
                 {userGroups.map((g, idx) => (
-                  <option key={`${g.id}-${idx}`} value={g.id}>
-                    {g.name} ({g.id.slice(0, 6)}...)
-                  </option>
+                  <option key={`${g.id}-${idx}`} value={g.id}>{g.name}</option>
                 ))}
               </select>
             )}
           </div>
 
-          <div className="flex items-center gap-2 md:gap-3">
-            {/* 予定追加ボタン */}
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => openAddEventModal()}
+              onClick={() => openModal()}
               disabled={userGroups.length === 0}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-slate-900 rounded-lg shadow-xs hover:bg-slate-800 active:scale-95 disabled:opacity-40 transition duration-150 cursor-pointer"
+              className="flex items-center gap-1 px-3 py-1.5 text-xs font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition cursor-pointer"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-              </svg>
-              <span>予定を追加</span>
-            </button>
-
-            {/* 更新ボタン */}
-            <button
-              onClick={() => fetchEvents()}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 rounded-lg shadow-xs hover:bg-slate-50 hover:border-slate-400 active:bg-slate-100 transition duration-150 cursor-pointer"
-            >
-              <svg className="w-3.5 h-3.5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              更新
+              <span>+ 予定追加</span>
             </button>
           </div>
         </header>
 
-        {/* カレンダーグリッド + 詳細パネル */}
-        <div className="flex-1 p-3 md:p-6 flex flex-col lg:flex-row gap-4 overflow-y-auto">
-          {/* カレンダーグリッド */}
-          <div className="flex-1 bg-white border border-slate-200 rounded-2xl shadow-xs flex flex-col overflow-hidden min-h-[400px] lg:min-h-0">
-            <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-500 py-2.5">
+        <div className="flex-1 p-2 md:p-5 flex flex-col lg:flex-row gap-3 md:gap-4 overflow-y-auto">
+          <div className="flex-1 bg-white border border-slate-200 rounded-2xl shadow-xs flex flex-col overflow-hidden min-h-[360px] lg:min-h-0">
+            <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50 text-center text-xs font-semibold text-slate-500 py-2">
               <span className="text-red-500">日</span>
               <span>月</span>
               <span>火</span>
@@ -579,31 +630,37 @@ export default function CalendarPage() {
                   <div
                     key={index}
                     onClick={() => setSelectedDate(item.date)}
-                    className={`p-1 md:p-1.5 flex flex-col justify-between cursor-pointer transition hover:bg-blue-50/50 ${
+                    className={`p-1 flex flex-col justify-between cursor-pointer transition hover:bg-blue-50/50 ${
                       !item.isCurrentMonth ? 'bg-slate-50/50 text-slate-300' : 'text-slate-700'
                     } ${isSelected ? 'bg-blue-50 ring-2 ring-blue-500 ring-inset' : ''}`}
                   >
                     <div className="flex justify-between items-start">
-                      <span className={`text-[11px] md:text-xs font-semibold px-1.5 py-0.5 rounded-full ${isToday ? 'bg-slate-900 text-white' : ''}`}>
+                      <span className={`text-[10px] md:text-xs font-semibold px-1 py-0.2 rounded-full ${isToday ? 'bg-slate-900 text-white' : ''}`}>
                         {item.date.getDate()}
                       </span>
-                      {dayEvents.length > 0 && (
-                        <span className="text-[9px] md:text-[10px] bg-slate-100 text-slate-700 font-bold px-1.5 py-0.2 rounded-full border border-slate-200">
-                          {dayEvents.length}
-                        </span>
-                      )}
                     </div>
 
-                    <div className="flex-1 mt-1 space-y-0.5 md:space-y-1 overflow-hidden">
-                      {dayEvents.slice(0, 2).map((evt, idx) => (
-                        <div key={idx} className="text-[9px] md:text-[10px] bg-slate-800 text-white px-1 py-0.5 rounded truncate">
-                          {evt.title}
+                    <div className="flex-1 mt-0.5 space-y-0.5 overflow-hidden">
+                      {dayEvents.slice(0, 2).map((evt) => (
+                        <div
+                          key={evt.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openModal(undefined, evt);
+                          }}
+                          style={{ backgroundColor: evt.color || '#3b82f6' }}
+                          className="text-[9px] md:text-[10px] text-white px-1 py-0.5 rounded truncate flex items-center justify-between shadow-xs hover:opacity-90"
+                        >
+                          <span className="truncate">{evt.title}</span>
+                          <div className="flex -space-x-1 shrink-0 ml-1">
+                            {evt.participants?.slice(0, 2).map((p) => (
+                              <div key={p.id}>{renderAvatar(p, 'w-3 h-3 text-[7px]')}</div>
+                            ))}
+                          </div>
                         </div>
                       ))}
                       {dayEvents.length > 2 && (
-                        <div className="text-[8px] md:text-[9px] text-slate-400 font-medium pl-0.5">
-                          他 {dayEvents.length - 2} 件
-                        </div>
+                        <div className="text-[8px] text-slate-400 font-medium">他 {dayEvents.length - 2} 件</div>
                       )}
                     </div>
                   </div>
@@ -612,62 +669,49 @@ export default function CalendarPage() {
             </div>
           </div>
 
-          {/* 選択日の予定パネル */}
-          <div className="w-full lg:w-80 bg-white border border-slate-200 rounded-2xl shadow-xs p-4 md:p-5 flex flex-col overflow-hidden shrink-0">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <h2 className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
-                <span className="text-slate-900 font-bold">
-                  {selectedDate.getMonth() + 1}月{selectedDate.getDate()}日の予定
-                </span>
-                <span className="text-slate-400 font-normal">
-                  {['日', '月', '火', '水', '木', '金', '土'][selectedDate.getDay()]}曜日
-                </span>
+          <div className="w-full lg:w-80 bg-white border border-slate-200 rounded-2xl p-4 flex flex-col overflow-hidden shrink-0">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <h2 className="font-bold text-slate-800 text-xs">
+                {selectedDate.getMonth() + 1}月{selectedDate.getDate()}日の予定
               </h2>
-
-              {userGroups.length > 0 && (
-                <button
-                  onClick={() => openAddEventModal(selectedDate)}
-                  className="text-slate-600 hover:text-slate-900 transition p-1 hover:bg-slate-100 rounded-md cursor-pointer"
-                  title="選択日に予定を追加"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                  </svg>
-                </button>
-              )}
+              <button
+                onClick={() => openModal(selectedDate)}
+                className="text-xs text-slate-600 hover:text-slate-900 font-bold"
+              >
+                + 追加
+              </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto mt-3 space-y-2.5 pr-1 min-h-[120px]">
-              {userGroups.length === 0 ? (
-                <div className="text-center text-xs text-slate-400 py-8 lg:py-12 space-y-2">
-                  <p>現在グループに未加入です</p>
-                  <p className="text-[11px] text-slate-400">予定を登録・共有するにはグループに参加してください</p>
-                  <Link
-                    href="/groups"
-                    className="inline-block mt-2 px-3 py-1.5 bg-slate-900 text-white font-semibold rounded-lg hover:bg-slate-800 transition"
-                  >
-                    グループ一覧へ
-                  </Link>
-                </div>
-              ) : selectedDateEvents.length === 0 ? (
-                <div className="text-center text-xs text-slate-400 py-8 lg:py-12 space-y-3">
-                  <p>予定はありません</p>
-                  <button
-                    onClick={() => openAddEventModal(selectedDate)}
-                    className="px-3 py-1.5 bg-slate-100 border border-slate-200 text-slate-700 font-semibold text-xs rounded-lg hover:bg-slate-200 transition cursor-pointer"
-                  >
-                    + 予定を追加する
-                  </button>
-                </div>
+            <div className="flex-1 overflow-y-auto mt-3 space-y-2 pr-1 min-h-[120px]">
+              {selectedDateEvents.length === 0 ? (
+                <div className="text-center text-xs text-slate-400 py-6">予定はありません</div>
               ) : (
-                selectedDateEvents.map((evt, idx) => (
-                  <div key={evt.id || idx} className="p-3 bg-slate-50 border border-slate-200 rounded-xl hover:border-slate-300 transition">
-                    <div className="text-[11px] font-semibold text-slate-500 mb-1">
-                      {formatTime(evt.start_time)} - {formatTime(evt.end_time)}
+                selectedDateEvents.map((evt) => (
+                  <div
+                    key={evt.id}
+                    onClick={() => openModal(undefined, evt)}
+                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl hover:border-slate-400 transition cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] font-semibold text-slate-500">
+                        {formatTime(evt.start_time)} - {formatTime(evt.end_time)}
+                      </span>
+                      <span
+                        className="w-2.5 h-2.5 rounded-full"
+                        style={{ backgroundColor: evt.color || '#3b82f6' }}
+                      />
                     </div>
-                    <div className="font-bold text-slate-900 text-sm mb-1">{evt.title}</div>
-                    {evt.description && (
-                      <div className="text-xs text-slate-500">{evt.description}</div>
+                    <div className="font-bold text-slate-900 text-xs mb-1.5">{evt.title}</div>
+
+                    {evt.participants && evt.participants.length > 0 && (
+                      <div className="flex items-center gap-1 mt-2 pt-1.5 border-t border-slate-200/60">
+                        <span className="text-[10px] text-slate-400">参加:</span>
+                        <div className="flex items-center -space-x-1">
+                          {evt.participants.map((p) => (
+                            <div key={p.id} title={p.full_name || p.email}>{renderAvatar(p, 'w-4 h-4 text-[8px]')}</div>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                 ))
@@ -677,67 +721,107 @@ export default function CalendarPage() {
         </div>
       </div>
 
-      {/* --------------------------------------------------
-          3. 予定追加モーダル (UserMenu.tsx と統一デザイン)
-      -------------------------------------------------- */}
-      {isAddModalOpen && (
+      {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-slate-900/40 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
-            {/* モーダルヘッダー */}
-            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-slate-50">
-              <h3 className="text-sm font-bold text-slate-900">予定の追加</h3>
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 bg-slate-50">
+              <h3 className="text-xs font-bold text-slate-900">
+                {editingEventId ? '予定の編集' : '新しい予定の作成'}
+              </h3>
               <button
-                type="button"
-                onClick={() => setIsAddModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 transition font-bold text-sm cursor-pointer"
+                onClick={() => setIsModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold text-sm"
               >
                 ✕
               </button>
             </div>
 
-            {/* モーダルコンテンツ */}
-            <div className="p-6 max-h-[75vh] overflow-y-auto">
+            <div className="p-5 max-h-[80vh] overflow-y-auto">
               {eventErrorMessage && (
-                <div className="mb-4 p-2.5 bg-red-50 border border-red-200 text-red-600 rounded-lg text-xs font-medium text-center">
+                <div className="mb-3 p-2 bg-red-50 text-red-600 text-xs rounded-lg text-center font-medium">
                   {eventErrorMessage}
                 </div>
               )}
 
-              <form onSubmit={handleSaveEvent} className="space-y-4">
-                {/* 予定タイトル */}
+              <form onSubmit={handleSaveEvent} className="space-y-3.5">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    タイトル <span className="text-red-500">*</span>
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">タイトル *</label>
                   <input
                     type="text"
                     required
                     value={eventTitle}
                     onChange={(e) => setEventTitle(e.target.value)}
-                    placeholder="例: チームミーティング"
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800"
+                    placeholder="例: ミーティング"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-800"
                   />
                 </div>
 
-                {/* 対象グループ選択 */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    追加先グループ <span className="text-red-500">*</span>
-                  </label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">グループ *</label>
                   <select
                     value={eventTargetGroupId}
-                    onChange={(e) => setEventTargetGroupId(e.target.value)}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800 bg-white cursor-pointer font-semibold text-slate-700"
+                    onChange={(e) => {
+                      setEventTargetGroupId(e.target.value);
+                      setSelectedParticipantIds([userId]);
+                    }}
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
                   >
-                    {userGroups.map((g, idx) => (
-                      <option key={`${g.id}-${idx}`} value={g.id}>
-                        {g.name}
-                      </option>
+                    {userGroups.map((g) => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
                     ))}
                   </select>
                 </div>
 
-                {/* 日付 */}
+                {currentAvailableMembers.length > 0 && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">参加メンバー（複数選択可）</label>
+                    <div className="flex flex-wrap gap-1.5 p-2 border border-slate-200 rounded-lg bg-slate-50 max-h-28 overflow-y-auto">
+                      {currentAvailableMembers.map((member) => {
+                        const isSelected = selectedParticipantIds.includes(member.id);
+                        return (
+                          <button
+                            type="button"
+                            key={member.id}
+                            onClick={() => {
+                              if (isSelected) {
+                                setSelectedParticipantIds(selectedParticipantIds.filter((id) => id !== member.id));
+                              } else {
+                                setSelectedParticipantIds([...selectedParticipantIds, member.id]);
+                              }
+                            }}
+                            className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition border cursor-pointer ${
+                              isSelected
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'
+                            }`}
+                          >
+                            {renderAvatar(member, 'w-3.5 h-3.5 text-[8px]')}
+                            <span className="text-[10px] font-semibold">{member.full_name || member.email?.split('@')[0]}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">ラベルカラー</label>
+                  <div className="flex gap-2 items-center">
+                    {COLOR_OPTIONS.map((c) => (
+                      <button
+                        type="button"
+                        key={c.value}
+                        onClick={() => setEventColor(c.value)}
+                        style={{ backgroundColor: c.value }}
+                        className={`w-6 h-6 rounded-full transition transform cursor-pointer ${
+                          eventColor === c.value ? 'ring-2 ring-offset-2 ring-slate-800 scale-110' : 'opacity-70 hover:opacity-100'
+                        }`}
+                        title={c.name}
+                      />
+                    ))}
+                  </div>
+                </div>
+
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">日付</label>
                   <input
@@ -745,12 +829,11 @@ export default function CalendarPage() {
                     required
                     value={eventDate}
                     onChange={(e) => setEventDate(e.target.value)}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
                   />
                 </div>
 
-                {/* 開始・終了時間 */}
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
                     <input
@@ -758,7 +841,7 @@ export default function CalendarPage() {
                       required
                       value={eventStartTime}
                       onChange={(e) => setEventStartTime(e.target.value)}
-                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
                     />
                   </div>
                   <div>
@@ -768,38 +851,44 @@ export default function CalendarPage() {
                       required
                       value={eventEndTime}
                       onChange={(e) => setEventEndTime(e.target.value)}
-                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
                     />
                   </div>
                 </div>
 
-                {/* メモ・詳細 */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">メモ / 詳細</label>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">詳細・メモ</label>
                   <textarea
                     value={eventDescription}
                     onChange={(e) => setEventDescription(e.target.value)}
-                    placeholder="会議のアジェンダや持ち物など"
-                    rows={3}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800 resize-none"
+                    rows={2}
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg resize-none"
                   />
                 </div>
 
-                {/* 保存ボタン */}
                 <div className="pt-2 flex gap-2">
+                  {editingEventId && (
+                    <button
+                      type="button"
+                      onClick={handleDeleteEvent}
+                      className="px-3 py-1.5 bg-red-50 text-red-600 font-semibold text-xs rounded-lg hover:bg-red-100 transition cursor-pointer"
+                    >
+                      削除
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => setIsAddModalOpen(false)}
-                    className="flex-1 py-2 text-xs font-semibold border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                    onClick={() => setIsModalOpen(false)}
+                    className="flex-1 py-1.5 text-xs font-semibold border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50 transition"
                   >
                     キャンセル
                   </button>
                   <button
                     type="submit"
                     disabled={isSavingEvent}
-                    className="flex-1 py-2 bg-slate-900 text-white font-semibold text-xs rounded-lg hover:bg-slate-800 disabled:opacity-50 transition cursor-pointer"
+                    className="flex-1 py-1.5 bg-slate-900 text-white font-semibold text-xs rounded-lg hover:bg-slate-800 transition"
                   >
-                    {isSavingEvent ? '保存中...' : '予定を保存'}
+                    {isSavingEvent ? '保存中...' : '保存'}
                   </button>
                 </div>
               </form>
@@ -808,111 +897,52 @@ export default function CalendarPage() {
         </div>
       )}
 
-      {/* --------------------------------------------------
-          4. AIチャットサイドパネル
-      -------------------------------------------------- */}
       <div
-        className={`fixed top-0 right-0 h-full bg-white border-l border-slate-200 flex flex-col shadow-2xl z-40 transition-all duration-300 ease-in-out overflow-hidden ${
+        className={`fixed top-0 right-0 h-full bg-white border-l border-slate-200 flex flex-col shadow-2xl z-40 transition-all duration-300 ${
           isChatOpen ? 'w-full sm:w-96 opacity-100' : 'w-0 opacity-0 pointer-events-none'
         }`}
       >
         <div className="min-w-[320px] sm:min-w-[384px] flex-1 flex flex-col h-full">
           <div className="p-4 border-b border-slate-200 bg-slate-900 text-white flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <span className="text-xs font-bold bg-slate-800 text-slate-200 px-2 py-0.5 rounded border border-slate-700">
-                AI
-              </span>
-              <div>
-                <h2 className="font-bold text-sm leading-none">アシスタント</h2>
-                <p className="text-[10px] text-slate-400 mt-1">日程調整・予定追加</p>
-              </div>
-            </div>
-
+            <span className="font-bold text-sm">AI アシスタント</span>
             <div className="flex items-center gap-2">
-              <button
-                onClick={handleClearHistory}
-                disabled={clearing}
-                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition text-xs cursor-pointer"
-                title="チャット履歴を削除"
-              >
-                🗑️
-              </button>
-              <button
-                onClick={() => setIsChatOpen(false)}
-                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition font-bold text-sm cursor-pointer"
-              >
-                ✕
-              </button>
+              <button onClick={handleClearHistory} className="text-xs">🗑️</button>
+              <button onClick={() => setIsChatOpen(false)} className="font-bold text-sm">✕</button>
             </div>
           </div>
 
-          {/* メッセージリスト */}
           <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-slate-50 text-xs">
             {messages.map((msg, index) => (
-              <div
-                key={index}
-                className={`flex flex-col ${
-                  msg.role === 'user' ? 'items-end' : 'items-start'
-                }`}
-              >
-                <div
-                  className={`max-w-[85%] p-3 rounded-2xl ${
-                    msg.role === 'user'
-                      ? 'bg-slate-900 text-white rounded-br-none'
-                      : 'bg-white border border-slate-200 text-slate-800 rounded-bl-none shadow-xs'
-                  }`}
-                >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {msg.content}
-                  </ReactMarkdown>
+              <div key={index} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                <div className={`max-w-[85%] p-3 rounded-2xl ${msg.role === 'user' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200'}`}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                 </div>
               </div>
             ))}
-            {loading && (
-              <div className="flex justify-start">
-                <div className="bg-white border border-slate-200 text-slate-500 p-3 rounded-2xl rounded-bl-none text-xs shadow-xs">
-                  AIが考え中...
-                </div>
-              </div>
-            )}
             <div ref={chatEndRef} />
           </div>
 
-          {/* チャット入力フォーム */}
-          <form
-            onSubmit={handleSendMessage}
-            className="p-3 border-t border-slate-200 bg-white flex gap-2"
-          >
+          <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-200 flex gap-2">
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="例: 明日14時にミーティング追加"
-              disabled={loading}
-              className="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-slate-800"
+              placeholder="メッセージを入力..."
+              className="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-xl"
             />
-            <button
-              type="submit"
-              disabled={loading || !input.trim()}
-              className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl hover:bg-slate-800 disabled:opacity-50 transition shrink-0 cursor-pointer"
-            >
+            <button type="submit" disabled={loading} className="px-4 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl">
               送信
             </button>
           </form>
         </div>
       </div>
 
-      {/* --------------------------------------------------
-          5. AIトグルフローティングボタン (isChatOpen === false 時のみレンダリング)
-      -------------------------------------------------- */}
       {!isChatOpen && (
         <button
           onClick={() => setIsChatOpen(true)}
-          className="fixed bottom-6 right-6 z-40 p-3.5 bg-slate-900 text-white rounded-full shadow-2xl hover:bg-slate-800 active:scale-95 transition flex items-center justify-center cursor-pointer border border-slate-700"
-          title="AIアシスタントを開く"
-          aria-label="AIアシスタントを開く"
+          className="fixed bottom-6 right-6 z-40 p-3.5 bg-slate-900 text-white rounded-full shadow-2xl hover:bg-slate-800 transition border border-slate-700"
         >
-          <span className="text-xl">🤖</span>
+          🤖
         </button>
       )}
     </div>
