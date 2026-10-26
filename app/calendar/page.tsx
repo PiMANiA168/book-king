@@ -74,9 +74,7 @@ export default function CalendarPage() {
   const [groupMembersMap, setGroupMembersMap] = useState<Record<string, UserProfile[]>>({});
   const [authChecking, setAuthChecking] = useState(true);
 
-  // --------------------------------------------------
   // 予定詳細・編集モーダル用ステート
-  // --------------------------------------------------
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [eventTitle, setEventTitle] = useState('');
@@ -145,26 +143,45 @@ export default function CalendarPage() {
     initData();
   }, []);
 
+  // 100%確実にグループメンバーのプロフィールを取得する処理
   const fetchAllGroupMembers = async (groupIds: string[]) => {
     if (groupIds.length === 0) return;
-    const { data } = await supabase
+
+    const { data: memberRows } = await supabase
       .from('group_members')
-      .select('group_id, user_id, profiles(id, full_name, avatar_url, email)')
+      .select('group_id, user_id')
       .in('group_id', groupIds);
 
-    if (data) {
-      const map: Record<string, UserProfile[]> = {};
-      data.forEach((item: any) => {
-        const gid = item.group_id;
-        if (!map[gid]) map[gid] = [];
-        if (item.profiles) {
-          map[gid].push(item.profiles);
-        }
+    if (!memberRows || memberRows.length === 0) return;
+
+    const allUserIds = Array.from(new Set(memberRows.map((m) => m.user_id)));
+    
+    const { data: profileRows } = await supabase
+      .from('profiles')
+      .select('id, full_name, avatar_url, email')
+      .in('id', allUserIds);
+
+    const profileMap: Record<string, UserProfile> = {};
+    if (profileRows) {
+      profileRows.forEach((p) => {
+        profileMap[p.id] = p;
       });
-      setGroupMembersMap(map);
     }
+
+    const map: Record<string, UserProfile[]> = {};
+    memberRows.forEach((item) => {
+      const gid = item.group_id;
+      if (!map[gid]) map[gid] = [];
+      const prof = profileMap[item.user_id] || { id: item.user_id, full_name: 'メンバー' };
+      if (!map[gid].some((p) => p.id === prof.id)) {
+        map[gid].push(prof);
+      }
+    });
+
+    setGroupMembersMap(map);
   };
 
+  // 100%確実に作成者と同行者のプロフィールを取得する処理
   const fetchEvents = async (targetGroupId?: string, availableGroupIds?: string[]) => {
     const gid = targetGroupId !== undefined ? targetGroupId : selectedGroupId;
     const allIds = availableGroupIds || userGroups.map((g) => g.id);
@@ -188,44 +205,61 @@ export default function CalendarPage() {
 
     if (!error && rawEvents) {
       const eventIds = rawEvents.map((e) => e.id);
-      const userIds = Array.from(new Set(rawEvents.map((e) => e.created_by).filter(Boolean)));
 
-      // 作成者プロフィール取得
-      let creatorsMap: Record<string, UserProfile> = {};
-      if (userIds.length > 0) {
-        const { data: profilesData } = await supabase
+      // 同行者データ取得
+      let partRows: { event_id: string; user_id: string }[] = [];
+      if (eventIds.length > 0) {
+        const { data: pData } = await supabase
+          .from('event_participants')
+          .select('event_id, user_id')
+          .in('event_id', eventIds);
+        if (pData) partRows = pData;
+      }
+
+      // 必要なユーザーID（作成者 + 同行者）を収集
+      const neededUserIds = new Set<string>();
+      rawEvents.forEach((e) => {
+        if (e.created_by) neededUserIds.add(e.created_by);
+      });
+      partRows.forEach((p) => {
+        if (p.user_id) neededUserIds.add(p.user_id);
+      });
+
+      // プロフィールを一括取得
+      let profilesMap: Record<string, UserProfile> = {};
+      if (neededUserIds.size > 0) {
+        const { data: profs } = await supabase
           .from('profiles')
           .select('id, full_name, avatar_url, email')
-          .in('id', userIds);
+          .in('id', Array.from(neededUserIds));
 
-        if (profilesData) {
-          profilesData.forEach((p) => {
-            creatorsMap[p.id] = p;
+        if (profs) {
+          profs.forEach((p) => {
+            profilesMap[p.id] = p;
           });
         }
       }
 
-      // 同行者（参加者）プロフィール取得
-      let participantsMap: Record<string, UserProfile[]> = {};
-      if (eventIds.length > 0) {
-        const { data: partData } = await supabase
-          .from('event_participants')
-          .select('event_id, profiles(id, full_name, avatar_url, email)')
-          .in('event_id', eventIds);
-
-        if (partData) {
-          partData.forEach((p: any) => {
-            if (!participantsMap[p.event_id]) participantsMap[p.event_id] = [];
-            if (p.profiles) participantsMap[p.event_id].push(p.profiles);
-          });
+      // イベントごとの同行者リスト構築
+      const eventParticipantsMap: Record<string, UserProfile[]> = {};
+      partRows.forEach((p) => {
+        if (!eventParticipantsMap[p.event_id]) eventParticipantsMap[p.event_id] = [];
+        const prof = profilesMap[p.user_id] || { id: p.user_id, full_name: 'ユーザー' };
+        if (!eventParticipantsMap[p.event_id].some((x) => x.id === prof.id)) {
+          eventParticipantsMap[p.event_id].push(prof);
         }
-      }
+      });
 
-      const formattedEvents: CalendarEvent[] = rawEvents.map((e) => ({
-        ...e,
-        creator: creatorsMap[e.created_by],
-        participants: participantsMap[e.id] || [],
-      }));
+      const formattedEvents: CalendarEvent[] = rawEvents.map((e) => {
+        const creator = profilesMap[e.created_by] || { id: e.created_by, full_name: '作成者' };
+        const participants = eventParticipantsMap[e.id] || [];
+
+        return {
+          ...e,
+          creator,
+          participants,
+        };
+      });
 
       setEvents(formattedEvents);
     }
@@ -243,9 +277,8 @@ export default function CalendarPage() {
     }
   };
 
-  // 編集権限があるかどうかのチェック関数
   const canUserEditEvent = (event: CalendarEvent | null) => {
-    if (!event) return true; // 新規作成は可能
+    if (!event) return true;
     const isCreator = event.created_by === userId;
     const isParticipant = event.participants?.some((p) => p.id === userId);
     return isCreator || isParticipant;
@@ -285,7 +318,7 @@ export default function CalendarPage() {
       setEventColor('#3b82f6');
       const defaultGroup = selectedGroupId === 'ALL' ? (userGroups[0]?.id || '') : selectedGroupId;
       setEventTargetGroupId(defaultGroup);
-      setSelectedParticipantIds([userId]); // 自分をデフォルト同行者に
+      setSelectedParticipantIds([userId]);
     }
     setIsModalOpen(true);
   };
@@ -534,13 +567,17 @@ export default function CalendarPage() {
         <img
           src={user.avatar_url}
           alt={user.full_name || 'User'}
+          title={user.full_name || user.email}
           className={`${size} rounded-full object-cover border border-white shrink-0`}
         />
       );
     }
     const initial = (user.full_name || user.email || 'U').charAt(0).toUpperCase();
     return (
-      <div className={`${size} rounded-full bg-slate-700 text-white font-bold flex items-center justify-center border border-white shrink-0`}>
+      <div
+        title={user.full_name || user.email}
+        className={`${size} rounded-full bg-slate-700 text-white font-bold flex items-center justify-center border border-white shrink-0`}
+      >
         {initial}
       </div>
     );
@@ -685,13 +722,17 @@ export default function CalendarPage() {
                           style={{ backgroundColor: evt.color || '#3b82f6' }}
                           className="text-[9px] md:text-[10px] text-white px-1 py-0.5 rounded truncate flex items-center justify-between shadow-xs hover:opacity-90"
                         >
-                          <span className="truncate">{evt.title}</span>
-                          {/* 作成者・同行者全員のアイコン一覧表示 */}
-                          <div className="flex -space-x-1 shrink-0 ml-1">
-                            {evt.creator && renderAvatar(evt.creator, 'w-3 h-3 text-[7px]')}
-                            {evt.participants?.filter(p => p.id !== evt.created_by).slice(0, 2).map((p) => (
-                              <div key={p.id}>{renderAvatar(p, 'w-3 h-3 text-[7px]')}</div>
-                            ))}
+                          <span className="truncate mr-1">{evt.title}</span>
+                          
+                          {/* 作成者・同行者の全アイコン表示 */}
+                          <div className="flex -space-x-1 shrink-0">
+                            {evt.creator && renderAvatar(evt.creator, 'w-3.5 h-3.5 text-[7px]')}
+                            {evt.participants
+                              ?.filter((p) => p.id !== evt.created_by)
+                              .slice(0, 2)
+                              .map((p) => (
+                                <div key={p.id}>{renderAvatar(p, 'w-3.5 h-3.5 text-[7px]')}</div>
+                              ))}
                           </div>
                         </div>
                       ))}
@@ -740,14 +781,16 @@ export default function CalendarPage() {
                     </div>
                     <div className="font-bold text-slate-900 text-xs mb-1.5">{evt.title}</div>
 
-                    {/* 作成者・同行者のアイコンを表示 */}
+                    {/* 作成者・同行者のアイコン表示 */}
                     <div className="flex items-center gap-1.5 mt-2 pt-1.5 border-t border-slate-200/60">
-                      <span className="text-[10px] text-slate-400">作成/同行:</span>
+                      <span className="text-[10px] text-slate-400">参加者:</span>
                       <div className="flex items-center -space-x-1">
                         {evt.creator && renderAvatar(evt.creator, 'w-4 h-4 text-[8px]')}
-                        {evt.participants?.filter(p => p.id !== evt.created_by).map((p) => (
-                          <div key={p.id} title={p.full_name || p.email}>{renderAvatar(p, 'w-4 h-4 text-[8px]')}</div>
-                        ))}
+                        {evt.participants
+                          ?.filter((p) => p.id !== evt.created_by)
+                          .map((p) => (
+                            <div key={p.id}>{renderAvatar(p, 'w-4 h-4 text-[8px]')}</div>
+                          ))}
                       </div>
                     </div>
                   </div>
@@ -825,7 +868,7 @@ export default function CalendarPage() {
                   </select>
                 </div>
 
-                {/* 同行者（複数人選択） */}
+                {/* 同行者選択 UI */}
                 {currentAvailableMembers.length > 0 && (
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">同行メンバー（複数選択可）</label>
