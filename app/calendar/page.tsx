@@ -74,9 +74,11 @@ export default function CalendarPage() {
   const [groupMembersMap, setGroupMembersMap] = useState<Record<string, UserProfile[]>>({});
   const [authChecking, setAuthChecking] = useState(true);
 
-  // モーダル用
+  // --------------------------------------------------
+  // 予定詳細・編集モーダル用ステート
+  // --------------------------------------------------
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [eventTitle, setEventTitle] = useState('');
   const [eventDate, setEventDate] = useState('');
   const [eventStartTime, setEventStartTime] = useState('10:00');
@@ -188,7 +190,7 @@ export default function CalendarPage() {
       const eventIds = rawEvents.map((e) => e.id);
       const userIds = Array.from(new Set(rawEvents.map((e) => e.created_by).filter(Boolean)));
 
-      // 作成者プロフィールの取得
+      // 作成者プロフィール取得
       let creatorsMap: Record<string, UserProfile> = {};
       if (userIds.length > 0) {
         const { data: profilesData } = await supabase
@@ -203,7 +205,7 @@ export default function CalendarPage() {
         }
       }
 
-      // 同行者プロフィールの取得
+      // 同行者（参加者）プロフィール取得
       let participantsMap: Record<string, UserProfile[]> = {};
       if (eventIds.length > 0) {
         const { data: partData } = await supabase
@@ -241,10 +243,18 @@ export default function CalendarPage() {
     }
   };
 
+  // 編集権限があるかどうかのチェック関数
+  const canUserEditEvent = (event: CalendarEvent | null) => {
+    if (!event) return true; // 新規作成は可能
+    const isCreator = event.created_by === userId;
+    const isParticipant = event.participants?.some((p) => p.id === userId);
+    return isCreator || isParticipant;
+  };
+
   const openModal = (targetDate?: Date, eventToEdit?: CalendarEvent) => {
     setEventErrorMessage('');
     if (eventToEdit) {
-      setEditingEventId(eventToEdit.id);
+      setEditingEvent(eventToEdit);
       setEventTitle(eventToEdit.title);
       const startDate = new Date(eventToEdit.start_time);
       const endDate = new Date(eventToEdit.end_time);
@@ -261,7 +271,7 @@ export default function CalendarPage() {
       setEventColor(eventToEdit.color || '#3b82f6');
       setSelectedParticipantIds(eventToEdit.participants?.map((p) => p.id) || []);
     } else {
-      setEditingEventId(null);
+      setEditingEvent(null);
       const baseDate = targetDate || selectedDate || new Date();
       const yyyy = baseDate.getFullYear();
       const mm = String(baseDate.getMonth() + 1).padStart(2, '0');
@@ -275,13 +285,17 @@ export default function CalendarPage() {
       setEventColor('#3b82f6');
       const defaultGroup = selectedGroupId === 'ALL' ? (userGroups[0]?.id || '') : selectedGroupId;
       setEventTargetGroupId(defaultGroup);
-      setSelectedParticipantIds([userId]);
+      setSelectedParticipantIds([userId]); // 自分をデフォルト同行者に
     }
     setIsModalOpen(true);
   };
 
   const handleSaveEvent = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canUserEditEvent(editingEvent)) {
+      setEventErrorMessage('この予定を変更する権限がありません。');
+      return;
+    }
     if (!eventTitle.trim()) {
       setEventErrorMessage('タイトルを入力してください。');
       return;
@@ -298,9 +312,9 @@ export default function CalendarPage() {
       const startDateTime = new Date(`${eventDate}T${eventStartTime}:00`).toISOString();
       const endDateTime = new Date(`${eventDate}T${eventEndTime}:00`).toISOString();
 
-      let currentEventId = editingEventId;
+      let currentEventId = editingEvent?.id;
 
-      if (editingEventId) {
+      if (editingEvent) {
         const { error } = await supabase
           .from('events')
           .update({
@@ -311,7 +325,7 @@ export default function CalendarPage() {
             group_id: eventTargetGroupId,
             color: eventColor,
           })
-          .eq('id', editingEventId);
+          .eq('id', editingEvent.id);
 
         if (error) throw error;
       } else {
@@ -356,11 +370,11 @@ export default function CalendarPage() {
   };
 
   const handleDeleteEvent = async () => {
-    if (!editingEventId) return;
+    if (!editingEvent || !canUserEditEvent(editingEvent)) return;
     if (!window.confirm('この予定を削除してもよろしいですか？')) return;
 
     try {
-      const { error } = await supabase.from('events').delete().eq('id', editingEventId);
+      const { error } = await supabase.from('events').delete().eq('id', editingEvent.id);
       if (error) throw error;
       setIsModalOpen(false);
       await fetchEvents();
@@ -542,6 +556,7 @@ export default function CalendarPage() {
 
   const selectedDateEvents = getEventsForDate(selectedDate);
   const currentAvailableMembers = eventTargetGroupId ? (groupMembersMap[eventTargetGroupId] || []) : [];
+  const isEditable = canUserEditEvent(editingEvent);
 
   return (
     <div className="flex h-[100dvh] bg-slate-100 text-slate-800 overflow-hidden relative">
@@ -671,7 +686,7 @@ export default function CalendarPage() {
                           className="text-[9px] md:text-[10px] text-white px-1 py-0.5 rounded truncate flex items-center justify-between shadow-xs hover:opacity-90"
                         >
                           <span className="truncate">{evt.title}</span>
-                          {/* 作成者・参加者のアイコン */}
+                          {/* 作成者・同行者全員のアイコン一覧表示 */}
                           <div className="flex -space-x-1 shrink-0 ml-1">
                             {evt.creator && renderAvatar(evt.creator, 'w-3 h-3 text-[7px]')}
                             {evt.participants?.filter(p => p.id !== evt.created_by).slice(0, 2).map((p) => (
@@ -725,7 +740,7 @@ export default function CalendarPage() {
                     </div>
                     <div className="font-bold text-slate-900 text-xs mb-1.5">{evt.title}</div>
 
-                    {/* 参加メンバー一覧表示 */}
+                    {/* 作成者・同行者のアイコンを表示 */}
                     <div className="flex items-center gap-1.5 mt-2 pt-1.5 border-t border-slate-200/60">
                       <span className="text-[10px] text-slate-400">作成/同行:</span>
                       <div className="flex items-center -space-x-1">
@@ -743,14 +758,21 @@ export default function CalendarPage() {
         </div>
       </div>
 
-      {/* 予定追加・編集モーダル */}
+      {/* 予定追加・詳細・編集モーダル */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center backdrop-blur-md bg-slate-900/40 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 bg-slate-50">
-              <h3 className="text-xs font-bold text-slate-900">
-                {editingEventId ? '予定の詳細・編集' : '新しい予定の作成'}
-              </h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs font-bold text-slate-900">
+                  {editingEvent ? '予定の詳細' : '新しい予定の作成'}
+                </h3>
+                {!isEditable && (
+                  <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded">
+                    閲覧のみ
+                  </span>
+                )}
+              </div>
               <button
                 onClick={() => setIsModalOpen(false)}
                 className="text-slate-400 hover:text-slate-600 font-bold text-sm"
@@ -760,6 +782,12 @@ export default function CalendarPage() {
             </div>
 
             <div className="p-5 max-h-[80vh] overflow-y-auto">
+              {!isEditable && (
+                <div className="mb-3 p-2.5 bg-slate-100 border border-slate-200 rounded-lg text-xs text-slate-600">
+                  🔒 この予定は作成者または同行者のみ変更・削除できます。
+                </div>
+              )}
+
               {eventErrorMessage && (
                 <div className="mb-3 p-2 bg-red-50 text-red-600 text-xs rounded-lg text-center font-medium">
                   {eventErrorMessage}
@@ -772,10 +800,11 @@ export default function CalendarPage() {
                   <input
                     type="text"
                     required
+                    disabled={!isEditable}
                     value={eventTitle}
                     onChange={(e) => setEventTitle(e.target.value)}
                     placeholder="例: チームミーティング"
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-800"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-800 disabled:bg-slate-100"
                   />
                 </div>
 
@@ -783,11 +812,12 @@ export default function CalendarPage() {
                   <label className="block text-xs font-bold text-slate-700 mb-1">グループ *</label>
                   <select
                     value={eventTargetGroupId}
+                    disabled={!isEditable}
                     onChange={(e) => {
                       setEventTargetGroupId(e.target.value);
                       setSelectedParticipantIds([userId]);
                     }}
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white disabled:bg-slate-100"
                   >
                     {userGroups.map((g) => (
                       <option key={g.id} value={g.id}>{g.name}</option>
@@ -798,7 +828,7 @@ export default function CalendarPage() {
                 {/* 同行者（複数人選択） */}
                 {currentAvailableMembers.length > 0 && (
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">同行メンバー選択</label>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">同行メンバー（複数選択可）</label>
                     <div className="flex flex-wrap gap-1.5 p-2 border border-slate-200 rounded-lg bg-slate-50 max-h-28 overflow-y-auto">
                       {currentAvailableMembers.map((member) => {
                         const isSelected = selectedParticipantIds.includes(member.id);
@@ -806,6 +836,7 @@ export default function CalendarPage() {
                           <button
                             type="button"
                             key={member.id}
+                            disabled={!isEditable}
                             onClick={() => {
                               if (isSelected) {
                                 setSelectedParticipantIds(selectedParticipantIds.filter((id) => id !== member.id));
@@ -813,11 +844,11 @@ export default function CalendarPage() {
                                 setSelectedParticipantIds([...selectedParticipantIds, member.id]);
                               }
                             }}
-                            className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition border cursor-pointer ${
+                            className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition border ${
                               isSelected
                                 ? 'bg-slate-900 text-white border-slate-900'
                                 : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'
-                            }`}
+                            } ${!isEditable ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer'}`}
                           >
                             {renderAvatar(member, 'w-3.5 h-3.5 text-[8px]')}
                             <span className="text-[10px] font-semibold">{member.full_name || member.email?.split('@')[0]}</span>
@@ -835,11 +866,12 @@ export default function CalendarPage() {
                       <button
                         type="button"
                         key={c.value}
+                        disabled={!isEditable}
                         onClick={() => setEventColor(c.value)}
                         style={{ backgroundColor: c.value }}
-                        className={`w-6 h-6 rounded-full transition transform cursor-pointer ${
+                        className={`w-6 h-6 rounded-full transition transform ${
                           eventColor === c.value ? 'ring-2 ring-offset-2 ring-slate-800 scale-110' : 'opacity-70 hover:opacity-100'
-                        }`}
+                        } ${!isEditable ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         title={c.name}
                       />
                     ))}
@@ -851,9 +883,10 @@ export default function CalendarPage() {
                   <input
                     type="date"
                     required
+                    disabled={!isEditable}
                     value={eventDate}
                     onChange={(e) => setEventDate(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
                   />
                 </div>
 
@@ -863,9 +896,10 @@ export default function CalendarPage() {
                     <input
                       type="time"
                       required
+                      disabled={!isEditable}
                       value={eventStartTime}
                       onChange={(e) => setEventStartTime(e.target.value)}
-                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
                     />
                   </div>
                   <div>
@@ -873,9 +907,10 @@ export default function CalendarPage() {
                     <input
                       type="time"
                       required
+                      disabled={!isEditable}
                       value={eventEndTime}
                       onChange={(e) => setEventEndTime(e.target.value)}
-                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg"
+                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
                     />
                   </div>
                 </div>
@@ -883,15 +918,16 @@ export default function CalendarPage() {
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">詳細・メモ</label>
                   <textarea
+                    disabled={!isEditable}
                     value={eventDescription}
                     onChange={(e) => setEventDescription(e.target.value)}
                     rows={2}
-                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg resize-none"
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg resize-none disabled:bg-slate-100"
                   />
                 </div>
 
                 <div className="pt-2 flex gap-2">
-                  {editingEventId && (
+                  {editingEvent && isEditable && (
                     <button
                       type="button"
                       onClick={handleDeleteEvent}
@@ -903,17 +939,19 @@ export default function CalendarPage() {
                   <button
                     type="button"
                     onClick={() => setIsModalOpen(false)}
-                    className="flex-1 py-1.5 text-xs font-semibold border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50 transition"
+                    className="flex-1 py-1.5 text-xs font-semibold border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50 transition cursor-pointer"
                   >
-                    キャンセル
+                    {isEditable ? 'キャンセル' : '閉じる'}
                   </button>
-                  <button
-                    type="submit"
-                    disabled={isSavingEvent}
-                    className="flex-1 py-1.5 bg-slate-900 text-white font-semibold text-xs rounded-lg hover:bg-slate-800 transition"
-                  >
-                    {isSavingEvent ? '保存中...' : '保存'}
-                  </button>
+                  {isEditable && (
+                    <button
+                      type="submit"
+                      disabled={isSavingEvent}
+                      className="flex-1 py-1.5 bg-slate-900 text-white font-semibold text-xs rounded-lg hover:bg-slate-800 transition cursor-pointer"
+                    >
+                      {isSavingEvent ? '保存中...' : '保存'}
+                    </button>
+                  )}
                 </div>
               </form>
             </div>
