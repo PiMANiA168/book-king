@@ -188,7 +188,7 @@ export default function CalendarPage() {
     if (!error && rawEvents) {
       const eventIds = rawEvents.map((e) => e.id);
       let participantsMap: Record<string, UserProfile[]> = {};
-      
+
       if (eventIds.length > 0) {
         const { data: partData } = await supabase
           .from('event_participants')
