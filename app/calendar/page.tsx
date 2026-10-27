@@ -54,23 +54,16 @@ const COLOR_OPTIONS = [
 
 const DEFAULT_WELCOME_MESSAGE: ChatMessage = {
   role: 'assistant',
-  content: 'こんにちは！BOOK KINGのAIアシスタントです。予定の確認や追加の指示を教えてください！',
+  content: 'こんにちは！BOOK KINGのAIアシスタントです。予定の追加指示などを入力してください！（例：「10月30日、メンバー全員でワホーの予定を入れて」）',
 };
 
-// --------------------------------------------------
-// ユーザー表示名・アバター生成ヘルパー関数
-// --------------------------------------------------
 const getUserDisplayName = (user?: UserProfile) => {
   if (!user) return 'ユーザー';
   if (user.full_name && user.full_name.trim() && user.full_name !== '作成者' && user.full_name !== 'メンバー') {
     return user.full_name;
   }
-  if (user.email) {
-    return user.email.split('@')[0];
-  }
-  if (user.id) {
-    return `ユーザー_${user.id.slice(0, 4)}`;
-  }
+  if (user.email) return user.email.split('@')[0];
+  if (user.id) return `ユーザー_${user.id.slice(0, 4)}`;
   return 'ユーザー';
 };
 
@@ -109,6 +102,7 @@ export default function CalendarPage() {
   const [editingEvent, setEditingEvent] = useState<CalendarEvent | null>(null);
   const [eventTitle, setEventTitle] = useState('');
   const [eventDate, setEventDate] = useState('');
+  const [isAllDay, setIsAllDay] = useState(false); // 終日フラグ
   const [eventStartTime, setEventStartTime] = useState('10:00');
   const [eventEndTime, setEventEndTime] = useState('11:00');
   const [eventDescription, setEventDescription] = useState('');
@@ -139,7 +133,6 @@ export default function CalendarPage() {
         const currentUserId = session.user.id;
         setUserId(currentUserId);
 
-        // 自分のプロフィールを profiles テーブルから優先取得
         const { data: myProfileData } = await supabase
           .from('profiles')
           .select('id, full_name, avatar_url, email')
@@ -150,7 +143,6 @@ export default function CalendarPage() {
         if (myProfileData && myProfileData.full_name) {
           myProfile = myProfileData;
         } else {
-          // DBに名前が反映されていない場合のみ Google metadata / email をフォールバック利用
           const fallbackName = session.user.user_metadata?.full_name || session.user.email?.split('@')[0];
           myProfile = {
             id: currentUserId,
@@ -195,7 +187,6 @@ export default function CalendarPage() {
     initData();
   }, []);
 
-  // グループメンバー一覧取得
   const fetchAllGroupMembers = async (groupIds: string[], myProf?: UserProfile) => {
     if (groupIds.length === 0) return;
 
@@ -222,10 +213,7 @@ export default function CalendarPage() {
 
     const activeMyProf = myProf || currentUserProfile;
     if (activeMyProf) {
-      profileMap[activeMyProf.id] = {
-        ...activeMyProf,
-        ...profileMap[activeMyProf.id], // profilesテーブルの最新情報を絶対優先
-      };
+      profileMap[activeMyProf.id] = { ...activeMyProf, ...profileMap[activeMyProf.id] };
     }
 
     const map: Record<string, UserProfile[]> = {};
@@ -241,7 +229,6 @@ export default function CalendarPage() {
     setGroupMembersMap(map);
   };
 
-  // 予定一覧および関係者（作成者・同行者）取得
   const fetchEvents = async (targetGroupId?: string, availableGroupIds?: string[], myProf?: UserProfile) => {
     const gid = targetGroupId !== undefined ? targetGroupId : selectedGroupId;
     const allIds = availableGroupIds || userGroups.map((g) => g.id);
@@ -299,10 +286,7 @@ export default function CalendarPage() {
 
       const activeMyProf = myProf || currentUserProfile;
       if (activeMyProf) {
-        profilesMap[activeMyProf.id] = {
-          ...activeMyProf,
-          ...profilesMap[activeMyProf.id], // profilesテーブルの最新情報を絶対優先
-        };
+        profilesMap[activeMyProf.id] = { ...activeMyProf, ...profilesMap[activeMyProf.id] };
       }
 
       const eventParticipantsMap: Record<string, UserProfile[]> = {};
@@ -361,8 +345,19 @@ export default function CalendarPage() {
       const dd = String(startDate.getDate()).padStart(2, '0');
       setEventDate(`${yyyy}-${mm}-${dd}`);
 
-      setEventStartTime(startDate.toTimeString().slice(0, 5));
-      setEventEndTime(endDate.toTimeString().slice(0, 5));
+      const sTime = startDate.toTimeString().slice(0, 5);
+      const eTime = endDate.toTimeString().slice(0, 5);
+
+      if (sTime === '00:00' && eTime === '23:59') {
+        setIsAllDay(true);
+        setEventStartTime('10:00');
+        setEventEndTime('11:00');
+      } else {
+        setIsAllDay(false);
+        setEventStartTime(sTime);
+        setEventEndTime(eTime);
+      }
+
       setEventDescription(eventToEdit.description || '');
       setEventTargetGroupId(eventToEdit.group_id);
       setEventColor(eventToEdit.color || '#3b82f6');
@@ -376,6 +371,7 @@ export default function CalendarPage() {
 
       setEventTitle('');
       setEventDate(`${yyyy}-${mm}-${dd}`);
+      setIsAllDay(true); // デフォルト終日
       setEventStartTime('10:00');
       setEventEndTime('11:00');
       setEventDescription('');
@@ -406,8 +402,11 @@ export default function CalendarPage() {
     setEventErrorMessage('');
 
     try {
-      const startDateTime = new Date(`${eventDate}T${eventStartTime}:00`).toISOString();
-      const endDateTime = new Date(`${eventDate}T${eventEndTime}:00`).toISOString();
+      const finalStart = isAllDay ? '00:00:00' : `${eventStartTime}:00`;
+      const finalEnd = isAllDay ? '23:59:59' : `${eventEndTime}:00`;
+
+      const startDateTime = new Date(`${eventDate}T${finalStart}`).toISOString();
+      const endDateTime = new Date(`${eventDate}T${finalEnd}`).toISOString();
 
       let currentEventId = editingEvent?.id;
 
@@ -524,7 +523,6 @@ export default function CalendarPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userText,
-          events: events,
           groupId: activeGroupId,
           userId: userId,
         }),
@@ -613,18 +611,22 @@ export default function CalendarPage() {
     setSelectedDate(today);
   };
 
-  const formatTime = (isoString: string) => {
+  const formatEventTimeDisplay = (startTimeIso: string, endTimeIso: string) => {
     try {
-      return new Date(isoString).toLocaleTimeString('ja-JP', {
-        hour: '2-digit',
-        minute: '2-digit',
-      });
+      const s = new Date(startTimeIso);
+      const e = new Date(endTimeIso);
+      const sTime = s.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+      const eTime = e.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+
+      if (sTime === '00:00' && (eTime === '23:59' || eTime === '00:00')) {
+        return '終日';
+      }
+      return `${sTime} - ${eTime}`;
     } catch {
       return '';
     }
   };
 
-  // 固有アバター表示コンポーネント
   const renderAvatar = (user?: UserProfile, size = 'w-4 h-4 text-[9px]') => {
     if (!user) return null;
     const name = getUserDisplayName(user);
@@ -794,7 +796,6 @@ export default function CalendarPage() {
                         >
                           <span className="truncate mr-1">{evt.title}</span>
                           
-                          {/* 作成者・同行者のアイコン表示 */}
                           <div className="flex -space-x-1 shrink-0">
                             {evt.creator && renderAvatar(evt.creator, 'w-3.5 h-3.5 text-[7px]')}
                             {evt.participants
@@ -842,7 +843,7 @@ export default function CalendarPage() {
                   >
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-[10px] font-semibold text-slate-500">
-                        {formatTime(evt.start_time)} - {formatTime(evt.end_time)}
+                        {formatEventTimeDisplay(evt.start_time, evt.end_time)}
                       </span>
                       <span
                         className="w-2.5 h-2.5 rounded-full"
@@ -851,7 +852,6 @@ export default function CalendarPage() {
                     </div>
                     <div className="font-bold text-slate-900 text-xs mb-1.5">{evt.title}</div>
 
-                    {/* 作成者・同行者のアイコン表示 */}
                     <div className="flex items-center gap-1.5 mt-2 pt-1.5 border-t border-slate-200/60">
                       <span className="text-[10px] text-slate-400">参加者:</span>
                       <div className="flex items-center -space-x-1">
@@ -1005,30 +1005,48 @@ export default function CalendarPage() {
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
-                    <input
-                      type="time"
-                      required
-                      disabled={!isEditable}
-                      value={eventStartTime}
-                      onChange={(e) => setEventStartTime(e.target.value)}
-                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">終了時間</label>
-                    <input
-                      type="time"
-                      required
-                      disabled={!isEditable}
-                      value={eventEndTime}
-                      onChange={(e) => setEventEndTime(e.target.value)}
-                      className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
-                    />
-                  </div>
+                {/* 終日設定チェックボックス */}
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="allDayCheckbox"
+                    disabled={!isEditable}
+                    checked={isAllDay}
+                    onChange={(e) => setIsAllDay(e.target.checked)}
+                    className="w-4 h-4 rounded text-slate-900 focus:ring-slate-800 cursor-pointer"
+                  />
+                  <label htmlFor="allDayCheckbox" className="text-xs font-bold text-slate-700 cursor-pointer">
+                    終日に設定する
+                  </label>
                 </div>
+
+                {/* 時間設定（終日チェック時は非表示） */}
+                {!isAllDay && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">開始時間</label>
+                      <input
+                        type="time"
+                        required={!isAllDay}
+                        disabled={!isEditable}
+                        value={eventStartTime}
+                        onChange={(e) => setEventStartTime(e.target.value)}
+                        className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">終了時間</label>
+                      <input
+                        type="time"
+                        required={!isAllDay}
+                        disabled={!isEditable}
+                        value={eventEndTime}
+                        onChange={(e) => setEventEndTime(e.target.value)}
+                        className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg disabled:bg-slate-100"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">詳細・メモ</label>
