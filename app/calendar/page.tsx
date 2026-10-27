@@ -58,12 +58,19 @@ const DEFAULT_WELCOME_MESSAGE: ChatMessage = {
 };
 
 // --------------------------------------------------
-// ユーザー名・アイコン識別のためのヘルパー関数
+// ユーザー表示名・アバター生成ヘルパー関数
 // --------------------------------------------------
 const getUserDisplayName = (user?: UserProfile) => {
-  if (!user) return '不明';
-  if (user.full_name && user.full_name.trim()) return user.full_name;
-  if (user.id) return `ユーザー_${user.id.slice(0, 4)}`;
+  if (!user) return 'ユーザー';
+  if (user.full_name && user.full_name.trim() && user.full_name !== '作成者' && user.full_name !== 'メンバー') {
+    return user.full_name;
+  }
+  if (user.email) {
+    return user.email.split('@')[0];
+  }
+  if (user.id) {
+    return `ユーザー_${user.id.slice(0, 4)}`;
+  }
   return 'ユーザー';
 };
 
@@ -91,6 +98,7 @@ export default function CalendarPage() {
   const [clearing, setClearing] = useState(false);
 
   const [userId, setUserId] = useState<string>('');
+  const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile | null>(null);
   const [userGroups, setUserGroups] = useState<GroupInfo[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState<string>('ALL');
   const [groupMembersMap, setGroupMembersMap] = useState<Record<string, UserProfile[]>>({});
@@ -131,6 +139,16 @@ export default function CalendarPage() {
         const currentUserId = session.user.id;
         setUserId(currentUserId);
 
+        // 自分のプロフィールを取得（metadataフォールバック付き）
+        const myName = session.user.user_metadata?.full_name || session.user.email?.split('@')[0];
+        const myProfile: UserProfile = {
+          id: currentUserId,
+          full_name: myName,
+          email: session.user.email,
+          avatar_url: session.user.user_metadata?.avatar_url,
+        };
+        setCurrentUserProfile(myProfile);
+
         const { data: memberData } = await supabase
           .from('group_members')
           .select('group_id, groups(id, name)')
@@ -150,8 +168,8 @@ export default function CalendarPage() {
         if (groups.length > 0) {
           setSelectedGroupId('ALL');
           const groupIds = groups.map((g) => g.id);
-          await fetchEvents('ALL', groupIds);
-          await fetchAllGroupMembers(groupIds);
+          await fetchEvents('ALL', groupIds, myProfile);
+          await fetchAllGroupMembers(groupIds, myProfile);
         }
 
         fetchChatHistory(currentUserId);
@@ -165,7 +183,8 @@ export default function CalendarPage() {
     initData();
   }, []);
 
-  const fetchAllGroupMembers = async (groupIds: string[]) => {
+  // グループメンバー一覧取得
+  const fetchAllGroupMembers = async (groupIds: string[], myProf?: UserProfile) => {
     if (groupIds.length === 0) return;
 
     const { data: memberRows } = await supabase
@@ -189,6 +208,10 @@ export default function CalendarPage() {
       });
     }
 
+    if (myProf) {
+      profileMap[myProf.id] = { ...profileMap[myProf.id], ...myProf };
+    }
+
     const map: Record<string, UserProfile[]> = {};
     memberRows.forEach((item) => {
       const gid = item.group_id;
@@ -202,7 +225,8 @@ export default function CalendarPage() {
     setGroupMembersMap(map);
   };
 
-  const fetchEvents = async (targetGroupId?: string, availableGroupIds?: string[]) => {
+  // 予定一覧および関係者（作成者・同行者）取得
+  const fetchEvents = async (targetGroupId?: string, availableGroupIds?: string[], myProf?: UserProfile) => {
     const gid = targetGroupId !== undefined ? targetGroupId : selectedGroupId;
     const allIds = availableGroupIds || userGroups.map((g) => g.id);
 
@@ -255,6 +279,11 @@ export default function CalendarPage() {
             profilesMap[p.id] = p;
           });
         }
+      }
+
+      const activeMyProf = myProf || currentUserProfile;
+      if (activeMyProf) {
+        profilesMap[activeMyProf.id] = { ...profilesMap[activeMyProf.id], ...activeMyProf };
       }
 
       const eventParticipantsMap: Record<string, UserProfile[]> = {};
@@ -576,7 +605,7 @@ export default function CalendarPage() {
     }
   };
 
-  // 固有アバターレンダリング
+  // 固有アバター表示コンポーネント
   const renderAvatar = (user?: UserProfile, size = 'w-4 h-4 text-[9px]') => {
     if (!user) return null;
     const name = getUserDisplayName(user);
@@ -746,7 +775,7 @@ export default function CalendarPage() {
                         >
                           <span className="truncate mr-1">{evt.title}</span>
                           
-                          {/* 作成者・同行者の全アイコン表示 */}
+                          {/* 作成者・同行者のアイコン表示 */}
                           <div className="flex -space-x-1 shrink-0">
                             {evt.creator && renderAvatar(evt.creator, 'w-3.5 h-3.5 text-[7px]')}
                             {evt.participants
@@ -890,7 +919,7 @@ export default function CalendarPage() {
                   </select>
                 </div>
 
-                {/* 同行者選択 UI */}
+                {/* 同行メンバー複数選択 */}
                 {currentAvailableMembers.length > 0 && (
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">同行メンバー（複数選択可）</label>
