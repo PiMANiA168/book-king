@@ -139,14 +139,26 @@ export default function CalendarPage() {
         const currentUserId = session.user.id;
         setUserId(currentUserId);
 
-        // 自分のプロフィールを取得（metadataフォールバック付き）
-        const myName = session.user.user_metadata?.full_name || session.user.email?.split('@')[0];
-        const myProfile: UserProfile = {
-          id: currentUserId,
-          full_name: myName,
-          email: session.user.email,
-          avatar_url: session.user.user_metadata?.avatar_url,
-        };
+        // 自分のプロフィールを profiles テーブルから優先取得
+        const { data: myProfileData } = await supabase
+          .from('profiles')
+          .select('id, full_name, avatar_url, email')
+          .eq('id', currentUserId)
+          .maybeSingle();
+
+        let myProfile: UserProfile;
+        if (myProfileData && myProfileData.full_name) {
+          myProfile = myProfileData;
+        } else {
+          // DBに名前が反映されていない場合のみ Google metadata / email をフォールバック利用
+          const fallbackName = session.user.user_metadata?.full_name || session.user.email?.split('@')[0];
+          myProfile = {
+            id: currentUserId,
+            full_name: fallbackName,
+            email: session.user.email,
+            avatar_url: session.user.user_metadata?.avatar_url,
+          };
+        }
         setCurrentUserProfile(myProfile);
 
         const { data: memberData } = await supabase
@@ -208,8 +220,12 @@ export default function CalendarPage() {
       });
     }
 
-    if (myProf) {
-      profileMap[myProf.id] = { ...profileMap[myProf.id], ...myProf };
+    const activeMyProf = myProf || currentUserProfile;
+    if (activeMyProf) {
+      profileMap[activeMyProf.id] = {
+        ...activeMyProf,
+        ...profileMap[activeMyProf.id], // profilesテーブルの最新情報を絶対優先
+      };
     }
 
     const map: Record<string, UserProfile[]> = {};
@@ -283,7 +299,10 @@ export default function CalendarPage() {
 
       const activeMyProf = myProf || currentUserProfile;
       if (activeMyProf) {
-        profilesMap[activeMyProf.id] = { ...profilesMap[activeMyProf.id], ...activeMyProf };
+        profilesMap[activeMyProf.id] = {
+          ...activeMyProf,
+          ...profilesMap[activeMyProf.id], // profilesテーブルの最新情報を絶対優先
+        };
       }
 
       const eventParticipantsMap: Record<string, UserProfile[]> = {};
