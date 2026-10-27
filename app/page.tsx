@@ -10,6 +10,7 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export default function Home() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState(''); // 名前用のステート追加
   const [isSignUp, setIsSignUp] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState('');
@@ -34,11 +35,34 @@ export default function Home() {
     setLoading(true);
 
     if (isSignUp) {
-      const { error } = await supabase.auth.signUp({ email, password });
+      if (!fullName.trim()) {
+        setErrorMsg('お名前（表示名）を入力してください。');
+        setLoading(false);
+        return;
+      }
+
+      const { data: authData, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName.trim(), // サインアップメタデータとして名前を保存
+          },
+        },
+      });
+
       if (error) {
         setErrorMsg(error.message);
         setLoading(false);
       } else {
+        // バックアップとして profiles テーブルにも直接挿入
+        if (authData.user) {
+          await supabase.from('profiles').upsert({
+            id: authData.user.id,
+            full_name: fullName.trim(),
+            email: email,
+          });
+        }
         window.location.href = '/calendar';
       }
     } else {
@@ -110,10 +134,25 @@ export default function Home() {
           </div>
         </div>
 
-        {/* メールアドレスフォーム */}
+        {/* 認証フォーム */}
         <form onSubmit={handleAuth} className="space-y-3">
+          {/* 新規登録時のみ名前入力欄を表示 */}
+          {isSignUp && (
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">お名前（表示名） *</label>
+              <input
+                type="text"
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                placeholder="例: 山田 太郎"
+                required={isSignUp}
+                className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-800"
+              />
+            </div>
+          )}
+
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">メールアドレス</label>
+            <label className="block text-xs font-bold text-slate-700 mb-1">メールアドレス *</label>
             <input
               type="email"
               value={email}
@@ -124,7 +163,7 @@ export default function Home() {
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">パスワード</label>
+            <label className="block text-xs font-bold text-slate-700 mb-1">パスワード *</label>
             <input
               type="password"
               value={password}
@@ -144,7 +183,11 @@ export default function Home() {
 
         <div className="mt-6 text-center">
           <button
-            onClick={() => { setIsSignUp(!isSignUp); setErrorMsg(''); }}
+            onClick={() => {
+              setIsSignUp(!isSignUp);
+              setErrorMsg('');
+              setFullName('');
+            }}
             className="text-xs text-slate-500 hover:text-slate-800 underline font-medium cursor-pointer"
           >
             {isSignUp ? 'すでにアカウントをお持ちの方（ログイン）' : 'アカウントをお持ちでない方（新規登録）'}
