@@ -57,6 +57,28 @@ const DEFAULT_WELCOME_MESSAGE: ChatMessage = {
   content: 'こんにちは！BOOK KINGのAIアシスタントです。予定の確認や追加の指示を教えてください！',
 };
 
+// --------------------------------------------------
+// ユーザー名・アイコン識別のためのヘルパー関数
+// --------------------------------------------------
+const getUserDisplayName = (user?: UserProfile) => {
+  if (!user) return '不明';
+  if (user.full_name && user.full_name.trim()) return user.full_name;
+  if (user.id) return `ユーザー_${user.id.slice(0, 4)}`;
+  return 'ユーザー';
+};
+
+const getAvatarBgColor = (id: string) => {
+  const colors = [
+    'bg-red-500', 'bg-blue-500', 'bg-emerald-500', 'bg-amber-500',
+    'bg-purple-500', 'bg-pink-500', 'bg-indigo-500', 'bg-teal-500', 'bg-cyan-500'
+  ];
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+};
+
 export default function CalendarPage() {
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [currentDate, setCurrentDate] = useState<Date>(new Date());
@@ -143,7 +165,6 @@ export default function CalendarPage() {
     initData();
   }, []);
 
-  // 100%確実にグループメンバーのプロフィールを取得する処理
   const fetchAllGroupMembers = async (groupIds: string[]) => {
     if (groupIds.length === 0) return;
 
@@ -172,7 +193,7 @@ export default function CalendarPage() {
     memberRows.forEach((item) => {
       const gid = item.group_id;
       if (!map[gid]) map[gid] = [];
-      const prof = profileMap[item.user_id] || { id: item.user_id, full_name: 'メンバー' };
+      const prof = profileMap[item.user_id] || { id: item.user_id };
       if (!map[gid].some((p) => p.id === prof.id)) {
         map[gid].push(prof);
       }
@@ -181,7 +202,6 @@ export default function CalendarPage() {
     setGroupMembersMap(map);
   };
 
-  // 100%確実に作成者と同行者のプロフィールを取得する処理
   const fetchEvents = async (targetGroupId?: string, availableGroupIds?: string[]) => {
     const gid = targetGroupId !== undefined ? targetGroupId : selectedGroupId;
     const allIds = availableGroupIds || userGroups.map((g) => g.id);
@@ -206,7 +226,6 @@ export default function CalendarPage() {
     if (!error && rawEvents) {
       const eventIds = rawEvents.map((e) => e.id);
 
-      // 同行者データ取得
       let partRows: { event_id: string; user_id: string }[] = [];
       if (eventIds.length > 0) {
         const { data: pData } = await supabase
@@ -216,7 +235,6 @@ export default function CalendarPage() {
         if (pData) partRows = pData;
       }
 
-      // 必要なユーザーID（作成者 + 同行者）を収集
       const neededUserIds = new Set<string>();
       rawEvents.forEach((e) => {
         if (e.created_by) neededUserIds.add(e.created_by);
@@ -225,7 +243,6 @@ export default function CalendarPage() {
         if (p.user_id) neededUserIds.add(p.user_id);
       });
 
-      // プロフィールを一括取得
       let profilesMap: Record<string, UserProfile> = {};
       if (neededUserIds.size > 0) {
         const { data: profs } = await supabase
@@ -240,18 +257,17 @@ export default function CalendarPage() {
         }
       }
 
-      // イベントごとの同行者リスト構築
       const eventParticipantsMap: Record<string, UserProfile[]> = {};
       partRows.forEach((p) => {
         if (!eventParticipantsMap[p.event_id]) eventParticipantsMap[p.event_id] = [];
-        const prof = profilesMap[p.user_id] || { id: p.user_id, full_name: 'ユーザー' };
+        const prof = profilesMap[p.user_id] || { id: p.user_id };
         if (!eventParticipantsMap[p.event_id].some((x) => x.id === prof.id)) {
           eventParticipantsMap[p.event_id].push(prof);
         }
       });
 
       const formattedEvents: CalendarEvent[] = rawEvents.map((e) => {
-        const creator = profilesMap[e.created_by] || { id: e.created_by, full_name: '作成者' };
+        const creator = profilesMap[e.created_by] || { id: e.created_by };
         const participants = eventParticipantsMap[e.id] || [];
 
         return {
@@ -560,23 +576,29 @@ export default function CalendarPage() {
     }
   };
 
+  // 固有アバターレンダリング
   const renderAvatar = (user?: UserProfile, size = 'w-4 h-4 text-[9px]') => {
     if (!user) return null;
+    const name = getUserDisplayName(user);
+
     if (user.avatar_url) {
       return (
         <img
           src={user.avatar_url}
-          alt={user.full_name || 'User'}
-          title={user.full_name || user.email}
+          alt={name}
+          title={name}
           className={`${size} rounded-full object-cover border border-white shrink-0`}
         />
       );
     }
-    const initial = (user.full_name || user.email || 'U').charAt(0).toUpperCase();
+
+    const initial = name.charAt(0).toUpperCase();
+    const bgColor = getAvatarBgColor(user.id || name);
+
     return (
       <div
-        title={user.full_name || user.email}
-        className={`${size} rounded-full bg-slate-700 text-white font-bold flex items-center justify-center border border-white shrink-0`}
+        title={name}
+        className={`${size} rounded-full ${bgColor} text-white font-bold flex items-center justify-center border border-white shrink-0 shadow-xs`}
       >
         {initial}
       </div>
@@ -875,6 +897,8 @@ export default function CalendarPage() {
                     <div className="flex flex-wrap gap-1.5 p-2 border border-slate-200 rounded-lg bg-slate-50 max-h-28 overflow-y-auto">
                       {currentAvailableMembers.map((member) => {
                         const isSelected = selectedParticipantIds.includes(member.id);
+                        const displayName = getUserDisplayName(member);
+
                         return (
                           <button
                             type="button"
@@ -887,14 +911,14 @@ export default function CalendarPage() {
                                 setSelectedParticipantIds([...selectedParticipantIds, member.id]);
                               }
                             }}
-                            className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-xs transition border ${
+                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition border ${
                               isSelected
                                 ? 'bg-slate-900 text-white border-slate-900'
                                 : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-100'
                             } ${!isEditable ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer'}`}
                           >
-                            {renderAvatar(member, 'w-3.5 h-3.5 text-[8px]')}
-                            <span className="text-[10px] font-semibold">{member.full_name || member.email?.split('@')[0]}</span>
+                            {renderAvatar(member, 'w-4 h-4 text-[9px]')}
+                            <span className="text-[11px] font-semibold">{displayName}</span>
                           </button>
                         );
                       })}
