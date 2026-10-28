@@ -107,7 +107,7 @@ ${weatherContext}
 2. **その他の会話・天気・質問の場合**:
    丁寧な日本語でテキストで返答してください。`;
 
-    // Groq API 呼び出し
+    // Groq API 呼び出し (利用可能な高速モデル llama-3.1-8b-instant を使用)
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -115,7 +115,7 @@ ${weatherContext}
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'llama-3.1-8b-instant',
         messages: [
           { role: 'system', content: systemInstruction },
           { role: 'user', content: message },
