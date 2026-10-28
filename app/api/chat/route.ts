@@ -85,29 +85,48 @@ export async function POST(req: Request) {
       ? `【提供された最新の天気予報データ】\n${weatherData}`
       : '【最新の天気予報データ】\n現在、天気情報の取得に失敗しています。';
 
-    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリのアシスタントです。
+    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリの超優秀なAIコンシェルジュです。
 
-【本日の日付】
-${todayFormatted} (${todayISO})
+【本日の日付（基準日）】
+${todayFormatted} (ISO表記: ${todayISO})
 
 ${eventsContext}
 
 ${weatherContext}
 
-【最優先指示】
-ユーザーの指示に従い、以下のように処理してください。
+【思考・動作ルール】
+1. **日付の解釈（相対表記対応）**:
+   「明日」「あさって」「今週末」「来週の月曜」「1週間後」「今月中」などの指示は、基準日 (${todayISO}) をベースにして正確な YYYY-MM-DD に計算してください。
 
-1. **予定作成の指示の場合**:
-   時間を聞き返さず、必ず以下のJSON形式のみを出力してください。
-   時間指定がない場合は start_time を "00:00"、end_time を "23:59"（終日）に設定してください。
-   「全員」「メンバー全員」などの指定があれば all_members を true にしてください。
+2. **メンバー範囲の判定**:
+   - ユーザーが「全員」「メンバー全員」「みんなで」「グループ全員」等の表現を使用している場合のみ、"all_members": true にしてください。
+   - 特にメンバーの指定がない場合や「自分だけ」の場合は、必ず "all_members": false にしてください。
 
-   {"is_event_creation": true, "title": "予定タイトル", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "all_members": true, "reply_message": "登録メッセージ"}
+3. **機能分類 (action)**:
+   - **"create_event"**: 確定した予定の追加要求、または前回のAIサジェストに対してユーザーが肯定（「はい」「おねがい」「入れて」など）した場合。時間指定がなければ start_time:"00:00", end_time:"23:59"（終日）とします。
+   - **"suggest_date"**: 「〜に行きたい」「空いてる日教えて」「いつがいい？」といった日程未定の相談・提案依頼。既存の予定と天気予報データを比較し、空いていて天気が良い日（晴れ/快晴）を提案する文章を作成してください。
+   - **"chat"**: 通常の質問、天気問い合わせ、雑談など。
 
-2. **その他の会話・天気・質問の場合**:
-   丁寧な日本語でテキストで返答してください。`;
+4. **交通案内の付与 (route_info)**:
+   目的地（富士Q、ディズニー、特定の観光地や場所など）がある予定を作成または提案する場合、都心方面からの移動手段別の情報（距離、時間、概算交通費）を推測して route_info オブジェクトに設定してください。
 
-    // Groq API 呼び出し (利用可能な高速モデル llama-3.1-8b-instant を使用)
+【出力フォーマット（厳密に以下のJSONのみを出力してください）】
+{
+  "action": "create_event" | "suggest_date" | "chat",
+  "title": "予定のタイトル",
+  "date": "YYYY-MM-DD",
+  "start_time": "HH:MM",
+  "end_time": "HH:MM",
+  "all_members": true または false,
+  "destination": "目的地名称（あれば）",
+  "reply_message": "ユーザーへの返答メッセージ",
+  "route_info": {
+    "car": "🚗 自動車: 約〇km / 約〇時間〇分",
+    "bike": "🚲 自転車: 約〇km / 約〇時間",
+    "public": "🚃 公共交通機関: 約〇時間〇分 / 交通費: 約〇,〇〇円 (電車・高速バス等)"
+  }
+}`;
+
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -133,7 +152,7 @@ ${weatherContext}
     const groqData = await groqResponse.json();
     const rawReply = groqData.choices[0]?.message?.content || '';
 
-    // JSONパース判定
+    // JSON パース処理
     let parsedData = null;
     try {
       const jsonMatch = rawReply.match(/\{[\s\S]*\}/);
@@ -141,11 +160,11 @@ ${weatherContext}
         parsedData = JSON.parse(jsonMatch[0]);
       }
     } catch (e) {
-      // 通常テキスト応答
+      // 通常のテキスト応答へフォールバック
     }
 
-    // 予定作成リクエスト時の処理
-    if (parsedData && parsedData.is_event_creation && userId) {
+    // 1. 予定作成アクション (create_event)
+    if (parsedData && (parsedData.action === 'create_event' || parsedData.is_event_creation) && userId) {
       const targetDate = parsedData.date || todayISO;
       const startTime = parsedData.start_time || '00:00';
       const endTime = parsedData.end_time || '23:59';
@@ -153,13 +172,24 @@ ${weatherContext}
       const startDateTime = new Date(`${targetDate}T${startTime}:00`).toISOString();
       const endDateTime = new Date(`${targetDate}T${endTime}:00`).toISOString();
 
+      let activeGroupId = groupId;
+      if (!activeGroupId || activeGroupId === 'ALL') {
+        const { data: userGroupRow } = await supabase
+          .from('group_members')
+          .select('group_id')
+          .eq('user_id', userId)
+          .limit(1)
+          .single();
+        if (userGroupRow) activeGroupId = userGroupRow.group_id;
+      }
+
       const { data: newEvent, error: insertError } = await supabase
         .from('events')
         .insert({
           title: parsedData.title || '新しい予定',
           start_time: startDateTime,
           end_time: endDateTime,
-          group_id: groupId || null,
+          group_id: activeGroupId || null,
           created_by: userId,
           color: '#3b82f6',
         })
@@ -171,13 +201,14 @@ ${weatherContext}
         throw new Error(`DB保存エラー: ${insertError.message}`);
       }
 
+      // 同行者登録（all_members が true の場合のみ全員、なければ自分のみ）
       let participantUserIds: string[] = [userId];
 
-      if (parsedData.all_members && groupId) {
+      if (parsedData.all_members && activeGroupId) {
         const { data: groupMembers } = await supabase
           .from('group_members')
           .select('user_id')
-          .eq('group_id', groupId);
+          .eq('group_id', activeGroupId);
 
         if (groupMembers && groupMembers.length > 0) {
           participantUserIds = groupMembers.map((m) => m.user_id);
@@ -195,14 +226,34 @@ ${weatherContext}
       const isAllDay = startTime === '00:00' && endTime === '23:59';
       const timeDisplay = isAllDay ? '（終日）' : `（${startTime}〜${endTime}）`;
 
+      let finalReply = parsedData.reply_message || `${targetDate} に「${parsedData.title}」の予定を${timeDisplay}追加しました！`;
+
+      // 交通情報がある場合は追記
+      if (parsedData.route_info) {
+        finalReply += `\n\n【📍 ${parsedData.destination || parsedData.title} への交通ルート案内】\n`;
+        if (parsedData.route_info.car) finalReply += `${parsedData.route_info.car}\n`;
+        if (parsedData.route_info.public) finalReply += `${parsedData.route_info.public}\n`;
+        if (parsedData.route_info.bike) finalReply += `${parsedData.route_info.bike}\n`;
+      }
+
       return NextResponse.json({
-        reply: parsedData.reply_message || `${targetDate} に「${parsedData.title}」の予定を${timeDisplay}追加しました！`,
+        reply: finalReply,
         eventAdded: true,
       });
     }
 
+    // 2. 日程サジェスト提案 (suggest_date) または 通常チャット (chat)
+    let replyText = parsedData?.reply_message || rawReply;
+
+    if (parsedData?.route_info) {
+      replyText += `\n\n【📍 交通ルート参考】\n`;
+      if (parsedData.route_info.car) replyText += `${parsedData.route_info.car}\n`;
+      if (parsedData.route_info.public) replyText += `${parsedData.route_info.public}\n`;
+      if (parsedData.route_info.bike) replyText += `${parsedData.route_info.bike}\n`;
+    }
+
     return NextResponse.json({
-      reply: rawReply,
+      reply: replyText,
       eventAdded: false,
     });
   } catch (error: any) {
