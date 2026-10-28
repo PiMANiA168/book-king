@@ -1,35 +1,17 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// Supabase クライアントの初期化
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// WMO天気コードを日本語表記に変換するマッピング
 const weatherCodeMap: Record<number, string> = {
-  0: '快晴',
-  1: '晴れ',
-  2: '時々曇り',
-  3: '曇り',
-  45: '霧',
-  48: '霧氷',
-  51: '小雨',
-  53: '雨',
-  55: '強い雨',
-  61: '弱い雨',
-  63: '雨',
-  65: '激しい雨',
-  71: '弱い雪',
-  73: '雪',
-  75: '激しい雪',
-  80: 'にわか雨',
-  81: '強いにわか雨',
-  82: '激しいにわか雨',
-  95: '雷雨',
+  0: '快晴', 1: '晴れ', 2: '時々曇り', 3: '曇り',
+  45: '霧', 48: '霧氷', 51: '小雨', 53: '雨', 55: '強い雨',
+  61: '弱い雨', 63: '雨', 65: '激しい雨', 71: '弱い雪', 73: '雪', 75: '激しい雪',
+  80: 'にわか雨', 81: '強いにわか雨', 82: '激しいにわか雨', 95: '雷雨',
 };
 
-// Open-Meteo API から天気予報を取得
 async function fetchWeatherData() {
   try {
     const url =
@@ -67,13 +49,13 @@ export async function POST(req: Request) {
 
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
+      console.error('エラー: GROQ_API_KEY が設定されていません。');
       return NextResponse.json(
-        { error: 'GROQ_API_KEY が .env.local に設定されていません。' },
+        { error: 'GROQ_API_KEY が設定されていません。Vercelの環境変数を確認してください。' },
         { status: 500 }
       );
     }
 
-    // 1. 現在日時（日本時間）の算出
     const now = new Date();
     const todayFormatted = now.toLocaleDateString('ja-JP', {
       year: 'numeric',
@@ -84,7 +66,6 @@ export async function POST(req: Request) {
     });
     const todayISO = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 
-    // 2. 予定データのコンテキスト化
     const eventsContext =
       events && events.length > 0
         ? `【グループの現在の予定一覧】\n` +
@@ -99,45 +80,34 @@ export async function POST(req: Request) {
             .join('\n')
         : '【グループの現在の予定一覧】\n現在、登録されている予定はありません。';
 
-    // 3. 天気データの取得
     const weatherData = await fetchWeatherData();
     const weatherContext = weatherData
       ? `【提供された最新の天気予報データ】\n${weatherData}`
       : '【最新の天気予報データ】\n現在、天気情報の取得に失敗しています。';
 
-    // 4. システムプロンプト（予定作成判定 & 終日自動補正ルール）
-    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリの優秀なAIアシスタントです。
+    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリのアシスタントです。
 
-【本日の日付（基準日）】
+【本日の日付】
 ${todayFormatted} (${todayISO})
 
 ${eventsContext}
 
 ${weatherContext}
 
-【指示】
-ユーザーのメッセージを解析し、以下のいずれかで処理してください。
+【最優先指示】
+ユーザーの指示に従い、以下のように処理してください。
 
-1. **予定追加の指示の場合**:
-   絶対に時間を聞き返さず、必ず以下のJSONフォーマットのみを出力してください（余計な文字列や解説は不要）。
-   時間帯の指定がない場合は、自動的に start_time を "00:00"、end_time を "23:59"（終日）に設定してください。
-   「全員」「メンバー全員」「みんな」等の単語があれば all_members を true にしてください。
+1. **予定作成の指示の場合**:
+   時間を聞き返さず、必ず以下のJSON形式のみを出力してください。
+   時間指定がない場合は start_time を "00:00"、end_time を "23:59"（終日）に設定してください。
+   「全員」「メンバー全員」などの指定があれば all_members を true にしてください。
 
-   【出力JSONフォーマット】
-   {
-     "is_event_creation": true,
-     "title": "予定のタイトル",
-     "date": "YYYY-MM-DD",
-     "start_time": "HH:MM",
-     "end_time": "HH:MM",
-     "all_members": true または false,
-     "reply_message": "ユーザーへの完了報告メッセージ"
-   }
+   {"is_event_creation": true, "title": "予定タイトル", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM", "all_members": true, "reply_message": "登録メッセージ"}
 
-2. **質問や通常会話・天気問い合わせの場合**:
-   提供された天気データや既存の予定を参照しながら、丁寧でわかりやすい日本語で直接テキストを返答してください。`;
+2. **その他の会話・天気・質問の場合**:
+   丁寧な日本語でテキストで返答してください。`;
 
-    // 5. Groq API の呼び出し
+    // Groq API 呼び出し
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -145,7 +115,7 @@ ${weatherContext}
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile', // 高精度なオープンモデル (または 'openai/gpt-oss-20b')
+        model: 'llama-3.3-70b-versatile',
         messages: [
           { role: 'system', content: systemInstruction },
           { role: 'user', content: message },
@@ -155,26 +125,26 @@ ${weatherContext}
     });
 
     if (!groqResponse.ok) {
-      const errData = await groqResponse.json();
-      throw new Error(errData.error?.message || 'Groq APIとの通信に失敗しました。');
+      const errText = await groqResponse.text();
+      console.error('Groq API エラーレスポンス:', errText);
+      throw new Error(`Groq APIエラー (${groqResponse.status}): ${errText}`);
     }
 
     const groqData = await groqResponse.json();
     const rawReply = groqData.choices[0]?.message?.content || '';
 
-    // 6. JSONパース判定（予定作成処理）
+    // JSONパース判定
     let parsedData = null;
     try {
-      // JSON文字列が含まれているか検出してパース
       const jsonMatch = rawReply.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         parsedData = JSON.parse(jsonMatch[0]);
       }
     } catch (e) {
-      // パース失敗時は通常のテキスト会話として処理
+      // 通常テキスト応答
     }
 
-    // 7. 予定登録実行 (is_event_creation が true の場合)
+    // 予定作成リクエスト時の処理
     if (parsedData && parsedData.is_event_creation && userId) {
       const targetDate = parsedData.date || todayISO;
       const startTime = parsedData.start_time || '00:00';
@@ -183,7 +153,6 @@ ${weatherContext}
       const startDateTime = new Date(`${targetDate}T${startTime}:00`).toISOString();
       const endDateTime = new Date(`${targetDate}T${endTime}:00`).toISOString();
 
-      // (1) events テーブルに新規予定を挿入
       const { data: newEvent, error: insertError } = await supabase
         .from('events')
         .insert({
@@ -198,11 +167,10 @@ ${weatherContext}
         .single();
 
       if (insertError) {
-        console.error('Supabase 予定追加エラー:', insertError);
-        throw new Error('データベースへの予定追加に失敗しました。');
+        console.error('Supabase 予定挿入エラー:', insertError);
+        throw new Error(`DB保存エラー: ${insertError.message}`);
       }
 
-      // (2) 同行者（参加者）の追加処理
       let participantUserIds: string[] = [userId];
 
       if (parsedData.all_members && groupId) {
@@ -233,15 +201,14 @@ ${weatherContext}
       });
     }
 
-    // 通常会話・回答の返却
     return NextResponse.json({
       reply: rawReply,
       eventAdded: false,
     });
   } catch (error: any) {
-    console.error('Groq API エラー:', error);
+    console.error('サーバー処理エラー:', error);
     return NextResponse.json(
-      { error: error.message || 'AIの応答生成に失敗しました。' },
+      { error: error.message || '内部サーバーエラーが発生しました。' },
       { status: 500 }
     );
   }
