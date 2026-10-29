@@ -1138,7 +1138,7 @@ export default function CalendarPage() {
           onClick={() => setIsChatOpen(true)}
           className="fixed bottom-6 right-6 z-40 p-3.5 bg-slate-900 text-white rounded-full shadow-2xl hover:bg-slate-800 transition border border-slate-700"
         >
-          🤖
+          AI
         </button>
       )}
     </div>
