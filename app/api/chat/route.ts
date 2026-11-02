@@ -37,7 +37,7 @@ async function fetchWeatherData() {
   }
 }
 
-// 既存予定から「すでに埋まっている日付 (YYYY-MM-DD)」を抽出
+// 既存予定から埋まっている日付 (YYYY-MM-DD) を抽出
 function getOccupiedDates(events: any[]): string[] {
   if (!events || !Array.isArray(events)) return [];
   return events.map((e: any) => {
@@ -55,16 +55,16 @@ function extractDestination(history: any[], currentMessage: string): string {
   ];
 
   for (const text of userMessages) {
-    const match = text.match(/([一-龠ぁ-んァ-ヶa-zA-Z0-9]+?)(?:にいきたい|に行きたい|へ行きたい|に行こう|へ行こう|にみんなで|へみんなで|へGO|への旅行|への予定|へ行こう)/);
+    const match = text.match(/([一-龠ぁ-んァ-ヶa-zA-Z0-9]+?)(?:にいきたい|に行きたい|へ行きたい|に行こう|へ行こう|にみんなで|へみんなで|へGO|への旅行|への予定)/);
     if (match && match[1]) {
       const cleaned = match[1].replace(/^(今月中|明日|来週|みんなで|どこか|確定で|今月|一番|降水確率|低い|雨|天気)/, '').trim();
-      if (cleaned && !['Unknown', '厳しいか', 'うん', 'はい', 'いいよ', 'ダメ', '東京へGOの予定だね'].includes(cleaned) && !cleaned.includes('[')) {
+      if (cleaned && !['Unknown', '厳しいか', 'うん', 'はい', 'いいよ', 'ダメ'].includes(cleaned) && !cleaned.includes('[')) {
         return cleaned;
       }
     }
   }
 
-  // AI側の直近提案から目的地を抽出
+  // AI側の直近提案から抽出
   for (let i = (history || []).length - 1; i >= 0; i--) {
     if (history[i].role === 'assistant') {
       const match = history[i].content.match(/「(.+?)へGO」/) || history[i].content.match(/『(.+?)へGO』/);
@@ -106,31 +106,27 @@ export async function POST(req: Request) {
     // 状態抽出
     const activeDestination = extractDestination(history, message) || '旅行';
     const weatherList = await fetchWeatherData();
-    const occupiedDates = getOccupiedDates(events); // DBから取得した埋まっている日付
+    const occupiedDates = getOccupiedDates(events);
     const rejectedDates = getRejectedDates(history, message);
 
-    // DBの既存予定 ＋ 会話のNG日 をすべて統合して弾く
     const allBlockedDates = [...new Set([...occupiedDates, ...rejectedDates])];
 
     // 空いている日の中で最良の天気日を選出
     let recommendedDate = '';
-    let weatherInfoStr = '';
     if (weatherList && weatherList.length > 0) {
       const validDays = weatherList.filter((w: any) => {
         return !allBlockedDates.some((b: string) => b && (w.date === b || b.includes(w.date) || w.date.includes(b)));
       });
 
-      // 降水確率が一番低い日を提案
       validDays.sort((a: any, b: any) => a.rainProb - b.rainProb);
       if (validDays[0]) {
         recommendedDate = validDays[0].date;
-        weatherInfoStr = `${validDays[0].date} (${validDays[0].weather} / 降水確率${validDays[0].rainProb}%)`;
       }
     }
 
     const eventsContext = events && events.length > 0
-      ? `【グループの既存の予定一覧（この日は提案不可）】\n` + events.map((e: any) => `- ${e.title}: ${e.start_time}`).join('\n')
-      : '【グループの現在の予定一覧】なし';
+      ? `【既存の予定一覧（提案不可）】\n` + events.map((e: any) => `- ${e.title}: ${e.start_time}`).join('\n')
+      : '【既存の予定一覧】なし';
 
     const systemInstruction = `あなたは「BOOK KING」のAIコンシェルジュです。
 日本語テキストで自然に応答しつつ、末尾に必ず以下のJSON形式の指示を含めてください。
@@ -146,7 +142,7 @@ ${eventsContext}
 
 【対話ルール】
 1. 重複防止: 既存の予定が入っている日やNG指定された日には提案を行わず、空いているおすすめ候補日（${recommendedDate}）を提案してください。
-2. 同意返答（「よろしく」「おねがい」「いいよ」「決定」等）の場合:
+2. 同意返答（「よろしく」「おねgal」「いいよ」「決定」等）の場合:
    - action: "create_event" で確定処理を行ってください。
 
 【出力形式】
@@ -171,6 +167,7 @@ ${eventsContext}
           { role: 'user', content: message }
         ],
         temperature: 0.2,
+        max_tokens: 300, // 制限超過防止
       }),
     });
 
