@@ -102,9 +102,9 @@ export async function POST(req: Request) {
     let recommendedDate = '';
     let weatherInfoStr = '';
     if (weatherList && weatherList.length > 0) {
-      const validDays = weatherList.filter(w => !rejectedDates.some(r => r.includes(w.date) || r.includes(`${parseInt(w.date.split('-')[1])}月${parseInt(w.date.split('-')[2])}日`)));
+      const validDays = weatherList.filter((w: any) => !rejectedDates.some((r: any) => r.includes(w.date) || r.includes(`${parseInt(w.date.split('-')[1])}月${parseInt(w.date.split('-')[2])}日`)));
       // 降水確率が一番低い日を提案
-      validDays.sort((a, b) => a.rainProb - b.rainProb);
+      validDays.sort((a: any, b: any) => a.rainProb - b.rainProb);
       if (validDays[0]) {
         recommendedDate = validDays[0].date;
         weatherInfoStr = `${validDays[0].date} (${validDays[0].weather} / 降水確率${validDays[0].rainProb}%)`;
@@ -112,7 +112,7 @@ export async function POST(req: Request) {
     }
 
     const weatherTextContext = weatherList
-      ? `【最新の天気予報データ】\n` + weatherList.map(w => `- ${w.date}: ${w.weather} (最高:${w.maxTemp}℃/最低:${w.minTemp}℃/降水確率:${w.rainProb}%)`).join('\n')
+      ? `【最新の天気予報データ】\n` + weatherList.map((w: any) => `- ${w.date}: ${w.weather} (最高:${w.maxTemp}℃/最低:${w.minTemp}℃/降水確率:${w.rainProb}%)`).join('\n')
       : '天気データ参照不可';
 
     const systemInstruction = `あなたは「BOOK KING」のAIコンシェルジュです。
@@ -152,7 +152,7 @@ ${weatherTextContext}
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b', // Qwenモデルに変更
+        model: 'qwen/qwen3.8-27b',
         messages: [
           { role: 'system', content: systemInstruction },
           ...formattedHistory,
@@ -212,7 +212,7 @@ ${weatherTextContext}
       if (activeGroupId) {
         const { data: groupMembers } = await supabase.from('group_members').select('user_id').eq('group_id', activeGroupId);
         if (groupMembers && groupMembers.length > 0) {
-          await supabase.from('event_participants').insert(groupMembers.map((m) => ({ event_id: newEvent.id, user_id: m.user_id })));
+          await supabase.from('event_participants').insert(groupMembers.map((m: any) => ({ event_id: newEvent.id, user_id: m.user_id })));
         }
       }
 
