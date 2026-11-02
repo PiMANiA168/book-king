@@ -37,17 +37,29 @@ async function fetchWeatherData() {
   }
 }
 
-// 既存予定から埋まっている日付 (YYYY-MM-DD) を抽出
+// 既存予定から埋まっている日付 (YYYY-MM-DD) を安全に抽出
 function getOccupiedDates(events: any[]): string[] {
   if (!events || !Array.isArray(events)) return [];
-  return events.map((e: any) => {
-    if (!e.start_time) return '';
-    const d = new Date(e.start_time);
-    return d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  }).filter(Boolean);
+  const occupiedSet = new Set<string>();
+
+  events.forEach((e: any) => {
+    const timeVal = e.start_time || e.start || e.date;
+    if (timeVal) {
+      try {
+        const d = new Date(timeVal);
+        if (!isNaN(d.getTime())) {
+          // JST (Asia/Tokyo) で YYYY-MM-DD に変換
+          const dateStr = d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+          occupiedSet.add(dateStr);
+        }
+      } catch (err) {}
+    }
+  });
+
+  return Array.from(occupiedSet);
 }
 
-// 会話履歴から目的地を最新優先で安全抽出
+// 会話履歴から目的地を最新優先で柔軟かつ安全に抽出
 function extractDestination(history: any[], currentMessage: string): string {
   const userMessages = [
     currentMessage,
@@ -55,21 +67,28 @@ function extractDestination(history: any[], currentMessage: string): string {
   ];
 
   for (const text of userMessages) {
-    const match = text.match(/([一-龠ぁ-んァ-ヶa-zA-Z0-9]+?)(?:にいきたい|に行きたい|へ行きたい|に行こう|へ行こう|にみんなで|へみんなで|へGO|への旅行|への予定)/);
+    // 地名キーワードパターン（「〜にみんなで」「〜にいこう」「〜行きたい」等）
+    const match = text.match(/([一-龠ぁ-んァ-ヶa-zA-Z0-9]+?)(?:にいきたい|に行きたい|へ行きたい|にいこう|に行こう|へいこう|へ行こう|にいく|に行く|へいく|へ行く|にみんなで|へみんなで|へGO|への旅行|への予定)/);
     if (match && match[1]) {
       const cleaned = match[1].replace(/^(今月中|明日|来週|みんなで|どこか|確定で|今月|一番|降水確率|低い|雨|天気)/, '').trim();
-      if (cleaned && !['Unknown', '厳しいか', 'うん', 'はい', 'いいよ', 'ダメ'].includes(cleaned) && !cleaned.includes('[')) {
+      if (cleaned && !['Unknown', '厳しいか', 'うん', 'はい', 'いいよ', 'ダメ', '旅行'].includes(cleaned) && !cleaned.includes('[')) {
         return cleaned;
       }
     }
+
+    // 地名単体発言（例：「神奈川」「富山」「北海道」）
+    const trimmed = text.trim();
+    if (trimmed.length >= 2 && trimmed.length <= 8 && !['こんにちは', 'うん', 'はい', 'おねがい', 'いいよ', 'いいね', 'よろしく', 'OK'].includes(trimmed)) {
+      return trimmed;
+    }
   }
 
-  // AI側の直近提案から抽出
+  // AI側の過去の提案から抽出
   for (let i = (history || []).length - 1; i >= 0; i--) {
     if (history[i].role === 'assistant') {
-      const match = history[i].content.match(/「(.+?)へGO」/) || history[i].content.match(/『(.+?)へGO』/);
-      if (match && match[1] && !['Unknown', '厳しいか', ''].includes(match[1])) {
-        return match[1];
+      const match = history[i].content.match(/「(.+?)へGO」/) || history[i].content.match(/『(.+?)へGO』/) || history[i].content.match(/(.+?)へ行く予定/);
+      if (match && match[1] && !['Unknown', '厳しいか', '旅行', ''].includes(match[1])) {
+        return match[1].trim();
       }
     }
   }
@@ -104,14 +123,15 @@ export async function POST(req: Request) {
     const todayISO = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 
     // 状態抽出
-    const activeDestination = extractDestination(history, message) || '旅行';
+    const activeDestination = extractDestination(history, message);
     const weatherList = await fetchWeatherData();
-    const occupiedDates = getOccupiedDates(events);
+    const occupiedDates = getOccupiedDates(events); // 埋まっている日付（11月3日等）
     const rejectedDates = getRejectedDates(history, message);
 
+    // 重複不可の日付リストを作成
     const allBlockedDates = [...new Set([...occupiedDates, ...rejectedDates])];
 
-    // 空いている日の中で最良の天気日を選出
+    // 既存予定やNG日を避けた「完全空き日」から最良の天気日を選出
     let recommendedDate = '';
     if (weatherList && weatherList.length > 0) {
       const validDays = weatherList.filter((w: any) => {
@@ -124,9 +144,9 @@ export async function POST(req: Request) {
       }
     }
 
-    const eventsContext = events && events.length > 0
-      ? `【既存の予定一覧（提案不可）】\n` + events.map((e: any) => `- ${e.title}: ${e.start_time}`).join('\n')
-      : '【既存の予定一覧】なし';
+    const eventsContext = occupiedDates.length > 0
+      ? `【既存予定で埋まっている日（提案不可）】\n` + occupiedDates.map(d => `- ${d}`).join('\n')
+      : '【既存予定で埋まっている日】なし';
 
     const systemInstruction = `あなたは「BOOK KING」のAIコンシェルジュです。
 日本語テキストで自然に応答しつつ、末尾に必ず以下のJSON形式の指示を含めてください。
@@ -137,17 +157,18 @@ ${todayFormatted} (${todayISO})
 ${eventsContext}
 
 【判定状態】
-- 目的地: "${activeDestination}"
-- 空いているおすすめの候補日: "${recommendedDate}"
+- 目的地: "${activeDestination || '未設定'}"
+- 空いているおすすめの候補日: "${recommendedDate || 'なし'}"
 
 【対話ルール】
-1. 重複防止: 既存の予定が入っている日やNG指定された日には提案を行わず、空いているおすすめ候補日（${recommendedDate}）を提案してください。
-2. 同意返答（「よろしく」「おねgal」「いいよ」「決定」等）の場合:
-   - action: "create_event" で確定処理を行ってください。
+1. 重複防止: 既存の予定が入っている日（${occupiedDates.join(', ') || 'なし'}）は絶対提案せず、完全に空いている日（${recommendedDate}）だけを提案してください。
+2. 目的地が未設定の場合: 「どちらへ行きますか？」と尋ねてください。勝手に「旅行へGO」などを作らないでください。
+3. 同意返答（「うん」「よろしく」「おねがい」「いいよ」等）の場合:
+   - 目的地が判明していれば action: "create_event" で確定処理を行ってください。
 
 【出力形式】
 返答文言の最後に、半角波括弧で囲んだJSONを1つだけ出力してください。
-{"action":"suggest_date"|"create_event"|"chat", "destination":"${activeDestination}", "date":"${recommendedDate}", "title":"${activeDestination}へGO"}`;
+{"action":"suggest_date"|"create_event"|"chat", "destination":"${activeDestination}", "date":"${recommendedDate}", "title":"${activeDestination ? `${activeDestination}へGO` : ''}"}`;
 
     const formattedHistory = (history || [])
       .filter((m: any) => m.role === 'user' || m.role === 'assistant')
@@ -167,7 +188,7 @@ ${eventsContext}
           { role: 'user', content: message }
         ],
         temperature: 0.2,
-        max_tokens: 300, // 制限超過防止
+        max_tokens: 300,
       }),
     });
 
@@ -190,8 +211,11 @@ ${eventsContext}
     const isAffirmative = /^(うん|はい|いいね|いいよ|おねがい|頼む|決定|その日で|行こう|OK|ok|オッケー|よろしく)/i.test(message.trim()) || message.includes('よろしく');
     const isRejectingDate = message.includes('予定が入っている') || message.includes('ダメ') || message.includes('無理') || message.includes('空いてない');
 
+    // 目的地が判定できているか確認
+    const finalDestination = activeDestination || parsedData.destination;
+
     // 1. 予定確定処理 (create_event)
-    if ((isAffirmative || parsedData.action === 'create_event') && !isRejectingDate && userId) {
+    if ((isAffirmative || parsedData.action === 'create_event') && !isRejectingDate && finalDestination && userId) {
       const targetDate = recommendedDate || parsedData.date || todayISO;
       const startDateTime = new Date(`${targetDate}T00:00:00`).toISOString();
       const endDateTime = new Date(`${targetDate}T23:59:00`).toISOString();
@@ -202,7 +226,7 @@ ${eventsContext}
         if (userGroupRow) activeGroupId = userGroupRow.group_id;
       }
 
-      const eventTitle = `${activeDestination}へGO`;
+      const eventTitle = `${finalDestination}へGO`;
 
       const { data: newEvent, error: insertError } = await supabase.from('events').insert({
         title: eventTitle,
@@ -222,14 +246,18 @@ ${eventsContext}
         }
       }
 
-      let reply = `${targetDate} に「${eventTitle}」の予定をメンバー全員・（終日）で追加しました！\n\n【📍 ${activeDestination} への交通ルート案内】\n🚗 自動車: ルート確認済み\n🚃 公共交通機関: ルート確認済み`;
+      let reply = `${targetDate} に「${eventTitle}」の予定をメンバー全員・（終日）で追加しました！\n\n【📍 ${finalDestination} への交通ルート案内】\n🚗 自動車: ルート確認済み\n🚃 公共交通機関: ルート確認済み`;
       return NextResponse.json({ reply, eventAdded: true });
     }
 
     // 2. チャット/サジェスト応答の整形
     let replyText = rawReply.replace(/\{[\s\S]*?\}/g, '').trim();
-    if (!replyText || replyText.includes('2026-11-03')) {
-      replyText = `${recommendedDate}（降水確率が低い日）に『${activeDestination}へGO』の予定を作成しますか？`;
+    if (!replyText || (occupiedDates.includes(recommendedDate))) {
+      if (finalDestination) {
+        replyText = `${recommendedDate}（空いている日）に『${finalDestination}へGO』の予定を作成しますか？`;
+      } else {
+        replyText = `どちらにお出かけされますか？行き先を教えていただければ、空いている日をご案内します！`;
+      }
     }
 
     return NextResponse.json({ reply: replyText, eventAdded: false });
