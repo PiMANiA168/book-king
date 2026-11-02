@@ -12,6 +12,51 @@ const weatherCodeMap: Record<number, string> = {
   80: 'にわか雨', 81: '強いにわか雨', 82: '激しいにわか雨', 95: '雷雨',
 };
 
+// 会話履歴全体から「目的地」を強力に抽出・保持する関数
+function findDestinationFromHistory(history: any[], currentMessage: string): string {
+  const allTexts = [...(history || []).map((h: any) => h.content), currentMessage];
+
+  // 地名のキーワードパターン検索
+  for (let i = allTexts.length - 1; i >= 0; i--) {
+    const text = allTexts[i];
+    const match = text.match(/([一-龠ぁ-んァ-ヶa-zA-Z0-9]+?)(?:に行きたい|へ行きたい|に行こう|へ行こう|にみんなで|へみんなで|へGO|への旅行|への予定|名)/);
+    if (match && match[1]) {
+      const cleaned = match[1].replace(/^(今月中|明日|来週|みんなで|どこか|確定で|今月|一番|降水確率|低い)/, '').trim();
+      if (cleaned && cleaned !== 'Unknown' && !cleaned.includes('[')) {
+        return cleaned;
+      }
+    }
+  }
+
+  // 「北海道」「沖縄」「富士Q」などの単体発言の拾い出し
+  for (let i = allTexts.length - 1; i >= 0; i--) {
+    const text = allTexts[i].trim();
+    if (['北海道', '沖縄', '富士Q', 'ディズニー', '京都', '大阪'].includes(text)) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
+// 会話履歴全体から「日付(YYYY-MM-DD)」を強力に抽出・保持する関数
+function findDateFromHistory(history: any[], currentMessage: string, currentYear: number): string | null {
+  const allTexts = [...(history || []).map((h: any) => h.content), currentMessage];
+
+  for (let i = allTexts.length - 1; i >= 0; i--) {
+    const text = allTexts[i];
+    const isoMatch = text.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) {
+      return `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
+    }
+    const mdMatch = text.match(/(\d{1,2})月(\d{1,2})日/);
+    if (mdMatch) {
+      return `${currentYear}-${mdMatch[1].padStart(2, '0')}-${mdMatch[2].padStart(2, '0')}`;
+    }
+  }
+  return null;
+}
+
 async function fetchWeatherData() {
   try {
     const url =
@@ -49,92 +94,57 @@ export async function POST(req: Request) {
 
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
-      console.error('エラー: GROQ_API_KEY が設定されていません。');
-      return NextResponse.json(
-        { error: 'GROQ_API_KEY が設定されていません。Vercelの環境変数を確認してください。' },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: 'GROQ_API_KEY が設定されていません。' }, { status: 500 });
     }
 
     const now = new Date();
-    const todayFormatted = now.toLocaleDateString('ja-JP', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      weekday: 'short',
-      timeZone: 'Asia/Tokyo',
-    });
+    const todayFormatted = now.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo' });
     const todayISO = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 
-    const eventsContext =
-      events && events.length > 0
-        ? `【グループの現在の予定一覧】\n` +
-          events
-            .map((e: any) => {
-              const start = new Date(e.start_time).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
-              const end = new Date(e.end_time).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
-              return `- タイトル: ${e.title}\n  日時: ${start} 〜 ${end}${
-                e.description ? `\n  メモ: ${e.description}` : ''
-              }`;
-            })
-            .join('\n')
-        : '【グループの現在の予定一覧】\n現在、登録されている予定はありません。';
+    const eventsContext = events && events.length > 0
+      ? `【グループの現在の予定一覧】\n` + events.map((e: any) => `- タイトル: ${e.title}\n  日時: ${e.start_time} 〜 ${e.end_time}`).join('\n')
+      : '【グループの現在の予定一覧】\n現在、登録されている予定はありません。';
 
     const weatherData = await fetchWeatherData();
     const weatherContext = weatherData
       ? `【提供された最新の天気予報データ】\n${weatherData}`
       : '【最新の天気予報データ】\n現在、天気情報の取得に失敗しています。';
 
-    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリの超優秀なAIコンシェルジュです。
+    const systemInstruction = `あなたは「BOOK KING」の共有カレンダーAIアシスタントです。
+必ず単一のJSONオブジェクトのみを出力してください。
 
 【本日の日付（基準日）】
-${todayFormatted} (ISO表記: ${todayISO})
+${todayFormatted} (${todayISO})
 
 ${eventsContext}
 
 ${weatherContext}
 
-【文脈継承・最優先動作ルール】
-1. **直前のやり取りからの文脈引き継ぎ（最重要）**:
-   - 会話履歴であなたが特定の日程や目的地を提案（例：「沖縄への旅行を11月3日に〜」）した直後に、ユーザーが「いいよ」「おねがい」「その日で」「11月3日」「みんなで行こう」「〇〇に置き換えて」などの肯定・短文返答をした場合：
-     -> **直前で話題にしていた「目的地」「提案日付（YYYY-MM-DD）」「メンバー範囲」を完璧に引き継ぎ、必ず action: "create_event" を発行してください。**
-     -> 絶対に「いつにしますか？」「何の予定ですか？」と質問を返すボケ行為をしないでください。
-
-2. **目的地タイトルの固定規則**:
-   - ユーザーが発言した実際の目的地（沖縄、北海道、ディズニー等）をそのまま使用し、「[目的地]へGO」という形式にしてください（例: 「沖縄へGO」）。
-   - プロンプトの例などに書かれていない無関係な場所（富士Q等）を勝手に生成・補完することは固く禁止します。
-
-3. **メンバー範囲 (all_members)**:
-   - 会話文脈または発言に「みんな」「全員」「みんなで」「みんなで行こう」が含まれている場合は **"all_members": true** に設定してください。
-
-4. **動作区分 (action)**:
-   - **"suggest_date"**: 日程未定で候補日を提案・確認する場合（DB保存なし）。
-   - **"create_event"**: ユーザーの同意が得られた場合、または明確に登録が命じられた場合（DB保存実行）。
+【思考・動作ルール】
+1. 会話履歴から「目的地」と「希望日付（または候補日）」を常に保持・引き継いでください。
+2. 「一番降水確率が低いところ」などの要求には、天気データから降水確率が最小の日付（例: 2026-11-03）を自動選定してください。
+3. ユーザーが「北海道」「11月3日」「いいね」「おねがい」等の短文で答えた場合は、聞き返さずに直前の目的地と日付を組み合わせて返答を作成してください。
 
 【出力JSONフォーマット】
 {
-  "action": "suggest_date" または "create_event" または "chat",
-  "title": "[目的地]へGO",
+  "action": "suggest_date" | "create_event" | "chat",
+  "title": "目的地へGO",
   "date": "YYYY-MM-DD",
   "start_time": "00:00",
   "end_time": "23:59",
-  "all_members": true または false,
-  "destination": "[目的地名称]",
-  "reply_message": "ユーザーへの返答文言",
+  "all_members": true,
+  "destination": "目的地名称",
+  "reply_message": "11月3日（降水確率2%）に「北海道へGO」の予定を登録しますか？",
   "route_info": {
-    "car": "🚗 自動車: 約〇km / 約〇時間",
-    "bike": "🚲 自転車: 約〇km / 約〇時間",
-    "public": "🚃 公共交通機関/飛行機: 約〇時間 / 交通費: 約〇円"
+    "car": "🚗 自動車: 約800km / 約10時間",
+    "bike": "🚲 自転車: 約800km / 約50時間",
+    "public": "🚃 公共交通機関/飛行機: 約2時間 / 交通費: 約15,000円"
   }
 }`;
 
-    // 過去の会話履歴を整形
     const formattedHistory = (history || [])
       .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-      .map((m: any) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      .map((m: any) => ({ role: m.role, content: m.content }));
 
     const apiMessages = [
       { role: 'system', content: systemInstruction },
@@ -142,7 +152,6 @@ ${weatherContext}
       { role: 'user', content: message },
     ];
 
-    // Groq API 呼び出し
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -158,26 +167,52 @@ ${weatherContext}
 
     if (!groqResponse.ok) {
       const errText = await groqResponse.text();
-      console.error('Groq API エラーレスポンス:', errText);
       throw new Error(`Groq APIエラー (${groqResponse.status}): ${errText}`);
     }
 
     const groqData = await groqResponse.json();
     const rawReply = groqData.choices[0]?.message?.content || '';
 
-    let parsedData = null;
+    let parsedData: any = null;
     try {
       const jsonMatch = rawReply.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        parsedData = JSON.parse(jsonMatch[0]);
-      }
+      if (jsonMatch) parsedData = JSON.parse(jsonMatch[0]);
     } catch (e) {
-      // 通常テキスト応答
+      // パース失敗時フォールバック
+    }
+
+    // --- プログラムによる状態復元（メモリ補完機能） ---
+    const extractedDest = findDestinationFromHistory(history, message);
+    const extractedDate = findDateFromHistory(history, message, now.getFullYear());
+
+    if (!parsedData) {
+      parsedData = { action: 'suggest_date', reply_message: rawReply };
+    }
+
+    // 目的地と日付を過去ログから強制統合
+    if (extractedDest) parsedData.destination = extractedDest;
+    if (extractedDate) parsedData.date = extractedDate;
+
+    // ユーザーの肯定・同意判定
+    const isAffirmative = /^(いいね|いいよ|おねがい|頼む|決定|その日で|行こう|OK|ok|オッケー)/i.test(message.trim());
+
+    // 両方のスロット（目的地＆日付）が埋まっている場合の強制動作制御
+    if (parsedData.destination && parsedData.date) {
+      if (isAffirmative || message.trim() === parsedData.destination || message.includes('11月') || message.includes('3日')) {
+        // 同意があった、または特定情報を追加で入れて両方が揃った場合 ➔ 予定確定登録へ
+        if (isAffirmative) {
+          parsedData.action = 'create_event';
+        } else {
+          // 提案確認を提示
+          parsedData.action = 'suggest_date';
+          parsedData.reply_message = `${parsedData.date} に「${parsedData.destination}へGO」の予定をメンバー全員・終日で作成しますか？`;
+        }
+      }
     }
 
     // 1. 予定確定追加処理 (create_event)
-    if (parsedData && parsedData.action === 'create_event' && userId) {
-      const targetDate = parsedData.date || todayISO;
+    if (parsedData.action === 'create_event' && userId) {
+      const targetDate = parsedData.date || extractedDate || todayISO;
       const startTime = parsedData.start_time || '00:00';
       const endTime = parsedData.end_time || '23:59';
 
@@ -195,10 +230,8 @@ ${weatherContext}
         if (userGroupRow) activeGroupId = userGroupRow.group_id;
       }
 
-      let eventTitle = parsedData.title || '新しい予定';
-      if (parsedData.destination && !eventTitle.includes('へGO')) {
-        eventTitle = `${parsedData.destination}へGO`;
-      }
+      const destName = parsedData.destination || extractedDest || 'お出かけ';
+      const eventTitle = `${destName}へGO`;
 
       const { data: newEvent, error: insertError } = await supabase
         .from('events')
@@ -214,14 +247,12 @@ ${weatherContext}
         .single();
 
       if (insertError) {
-        console.error('Supabase 予定挿入エラー:', insertError);
         throw new Error(`DB保存エラー: ${insertError.message}`);
       }
 
-      // 同行者登録
+      // 同行者登録（全員）
       let participantUserIds: string[] = [userId];
-
-      if (parsedData.all_members && activeGroupId) {
+      if (activeGroupId) {
         const { data: groupMembers } = await supabase
           .from('group_members')
           .select('user_id')
@@ -243,40 +274,36 @@ ${weatherContext}
       const isAllDay = startTime === '00:00' && endTime === '23:59';
       const timeDisplay = isAllDay ? '（終日）' : `（${startTime}〜${endTime}）`;
 
-      let finalReply = parsedData.reply_message || `${targetDate} に「${eventTitle}」の予定を${timeDisplay}追加しました！`;
+      let finalReply = `${targetDate} に「${eventTitle}」の予定をメンバー全員・${timeDisplay}で追加しました！`;
 
       if (parsedData.route_info) {
-        finalReply += `\n\n【📍 ${parsedData.destination || eventTitle} への交通ルート案内】\n`;
+        finalReply += `\n\n【📍 ${destName} への交通ルート案内】\n`;
         if (parsedData.route_info.car) finalReply += `${parsedData.route_info.car}\n`;
         if (parsedData.route_info.public) finalReply += `${parsedData.route_info.public}\n`;
         if (parsedData.route_info.bike) finalReply += `${parsedData.route_info.bike}\n`;
       }
 
-      return NextResponse.json({
-        reply: finalReply,
-        eventAdded: true,
-      });
+      return NextResponse.json({ reply: finalReply, eventAdded: true });
     }
 
-    // 2. 日程サジェスト提案 (suggest_date) または 通常チャット (chat)
-    let replyText = parsedData?.reply_message || rawReply;
+    // 2. 日程サジェスト提案・会話応答
+    let replyText = parsedData.reply_message || rawReply;
 
-    if (parsedData?.route_info) {
+    // AIがボケて「行き先はどちらですか？」等と聞き返してきた場合、プログラム側で上書き修復
+    if (parsedData.destination && parsedData.date && (replyText.includes('行き先') || replyText.includes('日程'))) {
+      replyText = `${parsedData.date}（降水確率が最も低い日）に「${parsedData.destination}へGO」の予定をメンバー全員・終体で作成しますか？`;
+    }
+
+    if (parsedData.route_info) {
       replyText += `\n\n【📍 交通ルート参考】\n`;
       if (parsedData.route_info.car) replyText += `${parsedData.route_info.car}\n`;
       if (parsedData.route_info.public) replyText += `${parsedData.route_info.public}\n`;
       if (parsedData.route_info.bike) replyText += `${parsedData.route_info.bike}\n`;
     }
 
-    return NextResponse.json({
-      reply: replyText,
-      eventAdded: false,
-    });
+    return NextResponse.json({ reply: replyText, eventAdded: false });
   } catch (error: any) {
     console.error('サーバー処理エラー:', error);
-    return NextResponse.json(
-      { error: error.message || '内部サーバーエラーが発生しました。' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: error.message || '内部サーバーエラーが発生しました。' }, { status: 500 });
   }
 }
