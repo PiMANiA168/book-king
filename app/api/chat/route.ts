@@ -45,7 +45,7 @@ async function fetchWeatherData() {
 
 export async function POST(req: Request) {
   try {
-    const { message, events, groupId, userId } = await req.json();
+    const { message, history, events, groupId, userId } = await req.json();
 
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
@@ -85,7 +85,8 @@ export async function POST(req: Request) {
       ? `【提供された最新の天気予報データ】\n${weatherData}`
       : '【最新の天気予報データ】\n現在、天気情報の取得に失敗しています。';
 
-    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリのAIコンシェルジュです。
+    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリの賢いAIコンシェルジュです。
+過去の会話履歴を含めてコンテキストを理解し、文脈に沿って的確に応答してください。
 
 【本日の日付（基準日）】
 ${todayFormatted} (ISO表記: ${todayISO})
@@ -95,18 +96,20 @@ ${eventsContext}
 ${weatherContext}
 
 【動作判定ルール】
-1. **action: "suggest_date" (日程サジェスト・確認問い合わせ)**:
-   - 「〜行きたいな」「〜にみんなで行きたい」「空いてる日ある？」など、日程が確定していない提案・打診の場合は、**絶対にデータベースへ追加せず "suggest_date" にしてください**。
-   - 既存の予定と天気データを参照し、空いていて天気が良いお勧めの日付（YYYY-MM-DD）を算出し、「〜月〜日に『〇〇へGO』の予定をメンバー全員・終日で作成しますか？」とユーザーに確認・質問する文章を reply_message にセットしてください。
+1. **会話文脈の継承 (重要)**:
+   - 過去のやり取りであなたが「〇月〇日に〜の予定を作成しますか？」と提案し、直後にユーザーが「その日にしよう」「いいね」「おねがい」「確定で」「みんなで行こう」などと返答した場合は、**提案していた日付・目的地・メンバー範囲を引き継いで、必ず action: "create_event" にしてください**。絶対に「何の予定ですか？」と聞き返さないでください。
 
-2. **action: "create_event" (確定登録)**:
-   - ユーザーが「〇月〇日に〜の予定を入れて」と日付指定で直接命令した場合、またはAIからの日程提案に対して同意（「はい」「おねがい」「登録して」「みんなで行こう」「その日で決定」など）した場合のみ **"create_event"** にしてください。
+2. **action: "suggest_date" (日程サジェスト・確認問い合わせ)**:
+   - 「〜行きたいな」「〜にみんなで行きたい」など日程未定の打診の場合は、**DBへ追加せず "suggest_date" にし**、お勧めの日付を提示して確認メッセージを作成してください。
 
-3. **予定タイトル**:
-   - どこかへ移動・外出する予定（富士Q、ディズニー、バーベキュー等）の場合、タイトルは必ず「[目的地・目的]へGO」形式にしてください（例: 「富士QへGO」）。
+3. **action: "create_event" (確定登録)**:
+   - 日付と内容が定まった予定追加、または提案への合意時に設定します。
 
-4. **メンバー範囲 (all_members)**:
-   - 「みんな」「全員」「みんなで」「グループ全員」という言葉がある場合、または「みんなで行こう」などの同意文言の場合は、**必ず "all_members": true** にしてください。
+4. **予定タイトル**:
+   - 移動・外出する予定（富士Q、ディズニー、バーベキュー等）の場合、タイトルは「[目的地]へGO」にしてください（例: 「富士QへGO」）。
+
+5. **メンバー範囲 (all_members)**:
+   - 会話文脈または最新発言に「みんな」「全員」「みんなで」が含まれる場合、または全員向けの提案への合意時は **"all_members": true** にしてください。
 
 【出力JSONフォーマット】
 {
@@ -117,7 +120,7 @@ ${weatherContext}
   "end_time": "23:59",
   "all_members": true,
   "destination": "富士Q",
-  "reply_message": "10月31日（晴れ）は予定が空いています！『富士QへGO』の予定をメンバー全員・終日で登録しますか？",
+  "reply_message": "10月31日に「富士QへGO」の予定をメンバー全員・終体で追加しました！",
   "route_info": {
     "car": "🚗 自動車: 約100km / 約1時間30分",
     "bike": "🚲 自転車: 約100km / 約5時間",
@@ -125,7 +128,22 @@ ${weatherContext}
   }
 }`;
 
-    // Groq API 呼び出し (openai/gpt-oss-20b)
+    // 過去の会話履歴を Groq 形式に整形
+    const formattedHistory = (history || [])
+      .filter((m: any) => m.role === 'user' || m.role === 'assistant')
+      .map((m: any) => ({
+        role: m.role,
+        content: m.content,
+      }));
+
+    // メッセージ配列を構築（システムプロンプト ➔ 会話履歴 ➔ 最新の入力）
+    const apiMessages = [
+      { role: 'system', content: systemInstruction },
+      ...formattedHistory,
+      { role: 'user', content: message },
+    ];
+
+    // Groq API 呼び出し
     const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -134,10 +152,7 @@ ${weatherContext}
       },
       body: JSON.stringify({
         model: 'openai/gpt-oss-20b',
-        messages: [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: message },
-        ],
+        messages: apiMessages,
         temperature: 0.1,
       }),
     });
@@ -159,10 +174,10 @@ ${weatherContext}
         parsedData = JSON.parse(jsonMatch[0]);
       }
     } catch (e) {
-      // 通常のテキスト応答へフォールバック
+      // 通常テキスト応答
     }
 
-    // 1. 予定確定追加アクション (create_event)
+    // 1. 予定確定追加処理 (create_event)
     if (parsedData && parsedData.action === 'create_event' && userId) {
       const targetDate = parsedData.date || todayISO;
       const startTime = parsedData.start_time || '00:00';
@@ -182,7 +197,6 @@ ${weatherContext}
         if (userGroupRow) activeGroupId = userGroupRow.group_id;
       }
 
-      // タイトルの補正（富士Q等のお出かけの場合は "〇〇へGO" に統一）
       let eventTitle = parsedData.title || '新しい予定';
       if (parsedData.destination && !eventTitle.includes('へGO')) {
         eventTitle = `${parsedData.destination}へGO`;
@@ -206,16 +220,16 @@ ${weatherContext}
         throw new Error(`DB保存エラー: ${insertError.message}`);
       }
 
-      // 同行者登録ロジック
+      // 同行者登録
       let participantUserIds: string[] = [userId];
 
       if (parsedData.all_members && activeGroupId) {
-        const { data: groupMembers, error: memberErr } = await supabase
+        const { data: groupMembers } = await supabase
           .from('group_members')
           .select('user_id')
           .eq('group_id', activeGroupId);
 
-        if (!memberErr && groupMembers && groupMembers.length > 0) {
+        if (groupMembers && groupMembers.length > 0) {
           participantUserIds = groupMembers.map((m) => m.user_id);
         }
       }
@@ -246,7 +260,7 @@ ${weatherContext}
       });
     }
 
-    // 2. 日程サジェスト提案 (suggest_date) または 通常チャット (chat) -> DB登録なし
+    // 2. 日程サジェスト提案 (suggest_date) または 通常チャット (chat)
     let replyText = parsedData?.reply_message || rawReply;
 
     if (parsedData?.route_info) {
