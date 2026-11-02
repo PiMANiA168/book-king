@@ -85,8 +85,7 @@ export async function POST(req: Request) {
       ? `【提供された最新の天気予報データ】\n${weatherData}`
       : '【最新の天気予報データ】\n現在、天気情報の取得に失敗しています。';
 
-    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリの賢いAIコンシェルジュです。
-過去の会話履歴を含めてコンテキストを理解し、文脈に沿って的確に応答してください。
+    const systemInstruction = `あなたは「BOOK KING」という共有カレンダーアプリの超優秀なAIコンシェルジュです。
 
 【本日の日付（基準日）】
 ${todayFormatted} (ISO表記: ${todayISO})
@@ -95,40 +94,41 @@ ${eventsContext}
 
 ${weatherContext}
 
-【動作判定ルール】
-1. **会話文脈の継承 (重要)**:
-   - 過去のやり取りであなたが「〇月〇日に〜の予定を作成しますか？」と提案し、直後にユーザーが「その日にしよう」「いいね」「おねがい」「確定で」「みんなで行こう」などと返答した場合は、**提案していた日付・目的地・メンバー範囲を引き継いで、必ず action: "create_event" にしてください**。絶対に「何の予定ですか？」と聞き返さないでください。
+【文脈継承・最優先動作ルール】
+1. **直前のやり取りからの文脈引き継ぎ（最重要）**:
+   - 会話履歴であなたが特定の日程や目的地を提案（例：「沖縄への旅行を11月3日に〜」）した直後に、ユーザーが「いいよ」「おねがい」「その日で」「11月3日」「みんなで行こう」「〇〇に置き換えて」などの肯定・短文返答をした場合：
+     -> **直前で話題にしていた「目的地」「提案日付（YYYY-MM-DD）」「メンバー範囲」を完璧に引き継ぎ、必ず action: "create_event" を発行してください。**
+     -> 絶対に「いつにしますか？」「何の予定ですか？」と質問を返すボケ行為をしないでください。
 
-2. **action: "suggest_date" (日程サジェスト・確認問い合わせ)**:
-   - 「〜行きたいな」「〜にみんなで行きたい」など日程未定の打診の場合は、**DBへ追加せず "suggest_date" にし**、お勧めの日付を提示して確認メッセージを作成してください。
+2. **目的地タイトルの固定規則**:
+   - ユーザーが発言した実際の目的地（沖縄、北海道、ディズニー等）をそのまま使用し、「[目的地]へGO」という形式にしてください（例: 「沖縄へGO」）。
+   - プロンプトの例などに書かれていない無関係な場所（富士Q等）を勝手に生成・補完することは固く禁止します。
 
-3. **action: "create_event" (確定登録)**:
-   - 日付と内容が定まった予定追加、または提案への合意時に設定します。
+3. **メンバー範囲 (all_members)**:
+   - 会話文脈または発言に「みんな」「全員」「みんなで」「みんなで行こう」が含まれている場合は **"all_members": true** に設定してください。
 
-4. **予定タイトル**:
-   - 移動・外出する予定（富士Q、ディズニー、バーベキュー等）の場合、タイトルは「[目的地]へGO」にしてください（例: 「富士QへGO」）。
-
-5. **メンバー範囲 (all_members)**:
-   - 会話文脈または最新発言に「みんな」「全員」「みんなで」が含まれる場合、または全員向けの提案への合意時は **"all_members": true** にしてください。
+4. **動作区分 (action)**:
+   - **"suggest_date"**: 日程未定で候補日を提案・確認する場合（DB保存なし）。
+   - **"create_event"**: ユーザーの同意が得られた場合、または明確に登録が命じられた場合（DB保存実行）。
 
 【出力JSONフォーマット】
 {
   "action": "suggest_date" または "create_event" または "chat",
-  "title": "富士QへGO",
+  "title": "[目的地]へGO",
   "date": "YYYY-MM-DD",
   "start_time": "00:00",
   "end_time": "23:59",
-  "all_members": true,
-  "destination": "富士Q",
-  "reply_message": "10月31日に「富士QへGO」の予定をメンバー全員・終体で追加しました！",
+  "all_members": true または false,
+  "destination": "[目的地名称]",
+  "reply_message": "ユーザーへの返答文言",
   "route_info": {
-    "car": "🚗 自動車: 約100km / 約1時間30分",
-    "bike": "🚲 自転車: 約100km / 約5時間",
-    "public": "🚃 公共交通機関: 約2時間 / 交通費: 約2,000円 (電車・高速バス等)"
+    "car": "🚗 自動車: 約〇km / 約〇時間",
+    "bike": "🚲 自転車: 約〇km / 約〇時間",
+    "public": "🚃 公共交通機関/飛行機: 約〇時間 / 交通費: 約〇円"
   }
 }`;
 
-    // 過去の会話履歴を Groq 形式に整形
+    // 過去の会話履歴を整形
     const formattedHistory = (history || [])
       .filter((m: any) => m.role === 'user' || m.role === 'assistant')
       .map((m: any) => ({
@@ -136,7 +136,6 @@ ${weatherContext}
         content: m.content,
       }));
 
-    // メッセージ配列を構築（システムプロンプト ➔ 会話履歴 ➔ 最新の入力）
     const apiMessages = [
       { role: 'system', content: systemInstruction },
       ...formattedHistory,
@@ -166,7 +165,6 @@ ${weatherContext}
     const groqData = await groqResponse.json();
     const rawReply = groqData.choices[0]?.message?.content || '';
 
-    // JSON パース処理
     let parsedData = null;
     try {
       const jsonMatch = rawReply.match(/\{[\s\S]*\}/);
