@@ -100,7 +100,7 @@ ${availableWeatherDays || 'データ参照不可'}
     // 会話履歴を Gemini API のコンテンツ形式に整形
     const contents = [
       ...(history || []).map((h: any) => ({
-        role: h.role === 'assistant' ? 'model' : 'user',
+        role: h.role === 'assistant' ? '' : 'user',
         parts: [{ text: h.content }]
       })),
       {
@@ -110,7 +110,7 @@ ${availableWeatherDays || 'データ参照不可'}
     ];
 
     // Gemini 3.5 Flash Lite API (または gemini-2.0-flash / gemini-1.5-flash) を呼び出し
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${apiKey}`;
 
     const geminiRes = await fetch(endpoint, {
       method: 'POST',
