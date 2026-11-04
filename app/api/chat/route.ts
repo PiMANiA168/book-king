@@ -58,79 +58,114 @@ function getOccupiedDates(events: any[]): string[] {
   return Array.from(occupiedSet);
 }
 
-// 目的地抽出の除外キーワード & 抽出ロジック強化
-function extractDestination(history: any[], currentMessage: string): string {
-  const ignoreWords = [
-    '今月の予定', '予定', 'スケジュール', '確認', '教えて', '何かある', '一覧',
-    'Unknown', '厳しいか', 'うん', 'はい', 'いいよ', 'ダメ', '旅行', 'よろしく'
-  ];
-
-  const userMessages = [
-    currentMessage,
-    ...(history || []).filter((h: any) => h.role === 'user').map((h: any) => h.content).reverse()
-  ];
-
-  for (const text of userMessages) {
-    if (text.includes('予定') || text.includes('スケジュール') || text.includes('確認')) {
-      continue;
-    }
-
-    const match = text.match(/([一-龠ぁ-んァ-ヶa-zA-Z0-9]+?)(?:にいきたい|に行きたい|へ行きたい|にいこう|に行こう|へいこう|へ行こう|にいく|に行く|へいく|へ行く|にみんなで|へみんなで|へGO|への旅行|への予定)/);
-    if (match && match[1]) {
-      const cleaned = match[1].replace(/^(今月中|明日|来週|みんなで|どこか|確定で|今月|一番|降水確率|低い|雨|天気)/, '').trim();
-      if (cleaned && !ignoreWords.includes(cleaned) && !cleaned.includes('[')) {
-        return cleaned;
-      }
-    }
-
-    const trimmed = text.trim();
-    if (trimmed.length >= 2 && trimmed.length <= 8 && !ignoreWords.includes(trimmed)) {
-      return trimmed;
-    }
-  }
-
-  for (let i = (history || []).length - 1; i >= 0; i--) {
-    if (history[i].role === 'assistant') {
-      const match = history[i].content.match(/「(.+?)へGO」/) || history[i].content.match(/『(.+?)へGO』/);
-      if (match && match[1] && !ignoreWords.includes(match[1])) {
-        return match[1].trim();
-      }
-    }
-  }
-
-  return '';
-}
-
-// ユーザーが「予定の確認・照会」を求めているか判定
-function isQueryScheduleIntent(message: string): boolean {
-  const queryKeywords = ['予定', 'スケジュール', '入ってる', '確認', '教えて', '何がある', '今月'];
-  const isCreateKeywords = ['行きたい', '追加', '作成', 'いこう', '予約', '入れて'];
-  
-  const hasQuery = queryKeywords.some(k => message.includes(k));
-  const hasCreate = isCreateKeywords.some(k => message.includes(k));
-
-  return hasQuery && !hasCreate;
-}
-
 export async function POST(req: Request) {
   try {
     const { message, history, events, groupId, userId } = await req.json();
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) return NextResponse.json({ error: 'GROQ_API_KEY が未設定です。' }, { status: 500 });
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return NextResponse.json({ error: 'GEMINI_API_KEY が未設定です。' }, { status: 500 });
 
     const now = new Date();
     const todayFormatted = now.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo' });
     const todayISO = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 
-    // 1. 照会インテント（「今月の予定は」等の問い合わせ）の判定
-    if (isQueryScheduleIntent(message)) {
+    const weatherList = await fetchWeatherData();
+    const occupiedDates = getOccupiedDates(events);
+
+    // 空いている日をリストアップ
+    const availableWeatherDays = (weatherList || [])
+      .filter((w: any) => !occupiedDates.includes(w.date))
+      .map((w: any) => `- ${w.date} (${w.weather}, 降水確率:${w.rainProb}%)`)
+      .join('\n');
+
+    const occupiedDatesStr = occupiedDates.length > 0 ? occupiedDates.join(', ') : 'なし';
+
+    const systemInstruction = `あなたは「BOOK KING」のAIコンシェルジュです。
+グループの予定調整をサポートします。
+
+【本日の日付】
+${todayFormatted} (${todayISO})
+
+【すでに予定が埋まっている日（提案不可）】
+${occupiedDatesStr}
+
+【空いていて提案可能な天気データ】
+${availableWeatherDays || 'データ参照不可'}
+
+【思考ガイドライン】
+1. 過去の会話履歴とユーザーの最新の発言から、目的地 (destination) と提案中の日付 (proposed_date) を把握・記憶・更新してください。
+2. ユーザーが「いいね」「お願い」「オッケー」などの同意や相づちを打った場合、過去ログで確定させようとしていた目的地と日付を引き継ぎ、action を "create_event" にしてください。「いいね」自体を目的地にしてはいけません。
+3. 候補日を提案する際は、埋まっている日（${occupiedDatesStr}）を固く避け、空いている候補日の中から天気が最も良い日を選んでください。
+4. ユーザーが今月の予定の確認・照会を求めてきた場合、action を "query_schedule" にしてください。`;
+
+    // 会話履歴を Gemini API のコンテンツ形式に整形
+    const contents = [
+      ...(history || []).map((h: any) => ({
+        role: h.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: h.content }]
+      })),
+      {
+        role: 'user',
+        parts: [{ text: message }]
+      }
+    ];
+
+    // Gemini 3.5 Flash Lite API (または gemini-2.0-flash / gemini-1.5-flash) を呼び出し
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+    const geminiRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: contents,
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: {
+              memory: {
+                type: 'OBJECT',
+                properties: {
+                  destination: { type: 'STRING', description: '認識・記憶している目的地（例: 北海道）。未定なら空文字' },
+                  proposed_date: { type: 'STRING', description: '提案・確定する日付（YYYY-MM-DD）。未定なら空文字' }
+                },
+                required: ['destination', 'proposed_date']
+              },
+              action: {
+                type: 'STRING',
+                enum: ['suggest_date', 'create_event', 'query_schedule', 'chat'],
+                description: 'AIの実行アクション'
+              },
+              reply_message: { type: 'STRING', description: 'ユーザーに返す会話本文' }
+            },
+            required: ['memory', 'action', 'reply_message']
+          }
+        }
+      })
+    });
+
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text();
+      throw new Error(`Gemini API エラー (${geminiRes.status}): ${errText}`);
+    }
+
+    const geminiData = await geminiRes.json();
+    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const parsed = JSON.parse(rawText);
+
+    const { memory, action, reply_message } = parsed;
+    const activeDestination = memory?.destination || '';
+    const activeDate = memory?.proposed_date || '';
+
+    // A. 予定の照会処理 (query_schedule)
+    if (action === 'query_schedule') {
       if (!events || events.length === 0) {
         return NextResponse.json({
           reply: '現在、登録されている予定はありません！何か予定を作成しますか？',
-          eventAdded: false,
+          eventAdded: false
         });
       }
-
       const formattedEvents = events.map((e: any) => {
         const d = new Date(e.start_time || e.start);
         const dateStr = !isNaN(d.getTime())
@@ -140,102 +175,28 @@ export async function POST(req: Request) {
       }).join('\n');
 
       return NextResponse.json({
-        reply: `【現在のグループの予定一覧】\n${formattedEvents}\n\n新しい予定の追加や相談があれば教えてくださいね！`,
-        eventAdded: false,
+        reply: `【現在のグループの予定一覧】\n${formattedEvents}\n\n新しい予定の追加やご相談があれば教えてくださいね！`,
+        eventAdded: false
       });
     }
 
-    // 2. 状態抽出（新規作成・提案フロー）
-    const activeDestination = extractDestination(history, message);
-    const weatherList = await fetchWeatherData();
-    const occupiedDates = getOccupiedDates(events);
-
-    let recommendedDate = '';
-    if (weatherList && weatherList.length > 0) {
-      const validDays = weatherList.filter((w: any) => !occupiedDates.includes(w.date));
-      validDays.sort((a: any, b: any) => a.rainProb - b.rainProb);
-      if (validDays[0]) {
-        recommendedDate = validDays[0].date;
-      }
-    }
-
-    const systemInstruction = `あなたは「BOOK KING」のAIコンシェルジュです。
-日本語テキストで自然に応答しつつ、末尾に必ず以下のJSON形式の指示を含めてください。
-
-【本日の日付】
-${todayFormatted} (${todayISO})
-
-【既存の埋まっている予定日（提案不可）】
-${occupiedDates.join(', ') || 'なし'}
-
-【判定状態】
-- 目的地: "${activeDestination || '未設定'}"
-- 空いているおすすめの候補日: "${recommendedDate || 'なし'}"
-
-【対話ルール】
-1. 重複防止: 既存予定日（${occupiedDates.join(', ') || 'なし'}）は絶対提案せず、完全に空いている日（${recommendedDate}）だけを提案してください。
-2. 目的地が未設定の場合: 「どちらへ行きますか？」と尋ねてください。
-3. 同意返答（「うん」「よろしく」「おねがい」「いいよ」等）の場合:
-   - 目的地が判明していれば action: "create_event" で確定処理を行ってください。
-
-【出力形式】
-返答文言の最後に、半角波括弧で囲んだJSONを1つだけ出力してください。
-{"action":"suggest_date"|"create_event"|"chat", "destination":"${activeDestination}", "date":"${recommendedDate}", "title":"${activeDestination ? `${activeDestination}へGO` : ''}"}`;
-
-    const formattedHistory = (history || [])
-      .filter((m: any) => m.role === 'user' || m.role === 'assistant')
-      .map((m: any) => ({ role: m.role, content: m.content }));
-
-    const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
-        messages: [
-          { role: 'system', content: systemInstruction },
-          ...formattedHistory,
-          { role: 'user', content: message }
-        ],
-        temperature: 0.2,
-        max_tokens: 300,
-      }),
-    });
-
-    if (!groqResponse.ok) {
-      const errText = await groqResponse.text();
-      throw new Error(`Groq APIエラー (${groqResponse.status}): ${errText}`);
-    }
-
-    const groqData = await groqResponse.json();
-    const rawReply = groqData.choices[0]?.message?.content || '';
-
-    let parsedData: any = {};
-    const jsonMatch = rawReply.match(/\{[\s\S]*?\}/);
-    if (jsonMatch) {
-      try {
-        parsedData = JSON.parse(jsonMatch[0]);
-      } catch (e) {}
-    }
-
-    const isAffirmative = /^(うん|はい|いいね|いいよ|おねがい|頼む|決定|その日で|行こう|OK|ok|オッケー|よろしく)/i.test(message.trim()) || message.includes('よろしく');
-    const finalDestination = activeDestination || parsedData.destination;
-
-    // 1. 予定確定処理 (create_event)
-    if ((isAffirmative || parsedData.action === 'create_event') && finalDestination && userId) {
-      const targetDate = recommendedDate || parsedData.date || todayISO;
-      const startDateTime = new Date(`${targetDate}T00:00:00`).toISOString();
-      const endDateTime = new Date(`${targetDate}T23:59:00`).toISOString();
+    // B. 予定の確定処理 (create_event)
+    if (action === 'create_event' && activeDestination && activeDate && userId) {
+      const startDateTime = new Date(`${activeDate}T00:00:00`).toISOString();
+      const endDateTime = new Date(`${activeDate}T23:59:00`).toISOString();
 
       let activeGroupId = groupId;
       if (!activeGroupId || activeGroupId === 'ALL') {
-        const { data: userGroupRow } = await supabase.from('group_members').select('group_id').eq('user_id', userId).limit(1).maybeSingle();
+        const { data: userGroupRow } = await supabase
+          .from('group_members')
+          .select('group_id')
+          .eq('user_id', userId)
+          .limit(1)
+          .maybeSingle();
         if (userGroupRow) activeGroupId = userGroupRow.group_id;
       }
 
-      const eventTitle = `${finalDestination}へGO`;
+      const eventTitle = `${activeDestination}へGO`;
 
       const { data: newEvent, error: insertError } = await supabase.from('events').insert({
         title: eventTitle,
@@ -249,27 +210,24 @@ ${occupiedDates.join(', ') || 'なし'}
       if (insertError) throw new Error(`DB保存エラー: ${insertError.message}`);
 
       if (activeGroupId) {
-        const { data: groupMembers } = await supabase.from('group_members').select('user_id').eq('group_id', activeGroupId);
+        const { data: groupMembers } = await supabase
+          .from('group_members')
+          .select('user_id')
+          .eq('group_id', activeGroupId);
         if (groupMembers && groupMembers.length > 0) {
-          await supabase.from('event_participants').insert(groupMembers.map((m: any) => ({ event_id: m.user_id })));
+          await supabase.from('event_participants').insert(
+            groupMembers.map((m: any) => ({ event_id: newEvent.id, user_id: m.user_id }))
+          );
         }
       }
 
-      let reply = `${targetDate} に「${eventTitle}」の予定をメンバー全員・（終日）で追加しました！\n\n【📍 ${finalDestination} への交通ルート案内】\n🚗 自動車: ルート確認済み\n🚃 公共交通機関: ルート確認済み`;
-      return NextResponse.json({ reply, eventAdded: true });
+      const confirmReply = `${activeDate} に「${eventTitle}」の予定をメンバー全員・（終日）で追加しました！\n\n【📍 ${activeDestination} への交通ルート案内】\n🚗 自動車: ルート確認済み\n🚃 公共交通機関: ルート確認済み`;
+      return NextResponse.json({ reply: confirmReply, eventAdded: true });
     }
 
-    // 2. チャット/サジェスト応答の整形
-    let replyText = rawReply.replace(/\{[\s\S]*?\}/g, '').trim();
-    if (!replyText || occupiedDates.includes(recommendedDate)) {
-      if (finalDestination) {
-        replyText = `${recommendedDate}（空いている日）に『${finalDestination}へGO』の予定を作成しますか？`;
-      } else {
-        replyText = `どちらにお出かけされますか？行き先を教えていただければ、空いている日をご案内します！`;
-      }
-    }
+    // C. 通常会話 / 日程提案 (suggest_date, chat)
+    return NextResponse.json({ reply: reply_message, eventAdded: false });
 
-    return NextResponse.json({ reply: replyText, eventAdded: false });
   } catch (error: any) {
     console.error('サーバー処理エラー:', error);
     return NextResponse.json({ error: error.message || '内部サーバーエラーが発生しました。' }, { status: 500 });
